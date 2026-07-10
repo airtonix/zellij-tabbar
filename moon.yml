@@ -40,6 +40,16 @@ tasks:
       - "src/**/*.rs"
       - ".cargo/config.toml"
 
+  e2e:
+    deps:
+      - "~:build"
+    script: bats tests
+    inputs:
+      - "tests/**/*"
+      - "target/wasm32-wasip1/release/zellij-tabbar.wasm"
+    options:
+      cache: false
+
   publish:
     deps:
       - "~:build"

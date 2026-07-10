@@ -1,5 +1,6 @@
 mod line;
 mod tab;
+mod template;
 
 use std::cmp::{max, min};
 use std::collections::BTreeMap;
@@ -32,6 +33,7 @@ struct State {
     mode_info: ModeInfo,
     tab_line: Vec<LinePart>,
     hide_swap_layout_indication: bool,
+    template: Option<String>,
     cached_keybinds: KeybindsVec,
     active_pane_scroll: Option<(usize, usize)>,
     new_tab_button_range: Option<(usize, usize)>,
@@ -47,10 +49,12 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
+        request_permission(&[PermissionType::ReadApplicationState]);
         self.hide_swap_layout_indication = configuration
             .get("hide_swap_layout_indication")
             .map(|s| s == "true")
             .unwrap_or(false);
+        self.template = configuration.get("template").cloned();
         set_selectable(false);
         subscribe(&[
             EventType::TabUpdate,
@@ -189,6 +193,33 @@ impl ZellijPlugin for State {
 
     fn render(&mut self, _rows: usize, cols: usize) {
         if self.tabs.is_empty() {
+            return;
+        }
+        if let Some(template) = &self.template {
+            match template::render(
+                template,
+                self.mode_info.session_name.as_deref(),
+                &self.tabs,
+                cols.saturating_sub(1),
+                self.hovered_tab_idx,
+                self.mode_info.style.colors,
+                self.mode_info.capabilities,
+            ) {
+                Ok(line) => self.tab_line = line,
+                Err(error) => {
+                    self.tab_line = vec![LinePart {
+                        part: format!("template error: {error}"),
+                        len: 0,
+                        tab_index: None,
+                    }];
+                },
+            }
+            self.new_tab_button_range = None;
+            let output = self
+                .tab_line
+                .iter()
+                .fold(String::new(), |output, part| output + &part.part);
+            print!("{output}");
             return;
         }
         let mut all_tabs: Vec<LinePart> = vec![];
