@@ -1,0 +1,6 @@
+rust = "stable"
+
+[settings]
+detect-strategy = "only-prototools"
+auto-install = true
+builtin-plugins = ["rust"]

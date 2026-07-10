@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag
+        required: true
+        default: v0.1.0
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup target add wasm32-wasip1
+      - run: cargo test --target "$(rustc -vV | awk '/^host:/ {print $2}')"
+      - run: cargo build --release --target wasm32-wasip1
+      - run: gh release create "$RELEASE_TAG" target/wasm32-wasip1/release/zellij-tabbar.wasm --generate-notes --title "$RELEASE_TAG"
