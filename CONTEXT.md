@@ -1,8 +1,8 @@
 # Glossary
 
-## Render Context
+## Template Globals
 
-Template-visible snapshot used to produce a frame. It contains session data, tab data, system data, and opaque actions. It does not perform plugin state changes while rendering.
+Template-visible snapshot used to produce a frame. `session`, `system`, `actions`, and `context` are top-level globals. `actions` exposes opaque click-action constructors; `context` contains rendering metadata such as theme colours. Rendering does not perform plugin state changes.
 
 ## Rendered Frame
 

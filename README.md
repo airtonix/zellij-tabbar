@@ -120,7 +120,7 @@ plugin location="file:/home/you/.config/zellij/plugins/zellij-tabbar.wasm" {
   {%- call Flex(direction="row", grow=1, overflow="scroll") -%}
     {%- for tab in session.tabs -%}
       {%- call Button(
-        on_click=context.actions.switch_tab(tab.index),
+        on_click=actions.switch_tab(tab.index),
         focused=tab.active
       ) -%}
         {{- tab.name -}}
@@ -128,7 +128,7 @@ plugin location="file:/home/you/.config/zellij/plugins/zellij-tabbar.wasm" {
     {%- endfor -%}
   {%- endcall -%}
 
-  {%- call Button(on_click=context.actions.new_tab()) -%}
+  {%- call Button(on_click=actions.new_tab()) -%}
     +
   {%- endcall -%}
 {%- endcall -%}
@@ -182,7 +182,7 @@ Switch tabs:
 
 ```jinja
 {% call Button(
-  on_click=context.actions.switch_tab(tab.index),
+  on_click=actions.switch_tab(tab.index),
   focused=tab.active
 ) %}
   {{ tab.name }}
@@ -192,12 +192,12 @@ Switch tabs:
 Create a tab:
 
 ```jinja
-{% call Button(on_click=context.actions.new_tab()) %}
+{% call Button(on_click=actions.new_tab()) %}
   +
 {% endcall %}
 ```
 
-Only actions supplied through `context.actions` are accepted. Constructed action strings are rejected.
+Only actions supplied through `actions` are accepted. Constructed action strings are rejected.
 
 Supported mouse interaction is left click. Right click and middle click have no configured button actions.
 
@@ -282,7 +282,7 @@ With:
 
 ```jinja
 {% call Button(
-  on_click=context.actions.switch_tab(tab.index),
+  on_click=actions.switch_tab(tab.index),
   focused=tab.active
 ) %}
   {{ tab.name }}

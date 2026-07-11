@@ -19,10 +19,10 @@ pub(super) const DEFAULT_TEMPLATE: &str = r#"{%- call Flex(direction="row") -%}
 {%- call Flex(shrink=0) -%}{{ session.name }} {% endcall -%}
 {%- call Flex(direction="row", grow=1, shrink=1, overflow="scroll") -%}
 {%- for tab in session.tabs -%}
-{%- call Button(on_click=context.actions.switch_tab(tab.index), focused=tab.active) -%}{{ tab.name }}{%- endcall -%}
+{%- call Button(on_click=actions.switch_tab(tab.index), focused=tab.active) -%}{{ tab.name }}{%- endcall -%}
 {%- endfor -%}
 {%- endcall -%}
-{%- call Button(on_click=context.actions.new_tab()) -%}+{%- endcall -%}
+{%- call Button(on_click=actions.new_tab()) -%}+{%- endcall -%}
 {%- endcall -%}"#;
 
 #[derive(Serialize)]
@@ -175,7 +175,8 @@ pub(super) fn render_tree(
         context! {
             session => model,
             system => context! { time => Local::now().timestamp() },
-            context => context! { actions => actions, theme => theme },
+            actions => actions,
+            context => context! { theme => theme },
         },
     )?;
     Ok(Node::Flex {
@@ -196,13 +197,13 @@ fn decode_action(value: &Value) -> Result<ClickAction, Error> {
     let value = value.as_str().ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidOperation,
-            "Button on_click must come from context.actions",
+            "Button on_click must come from actions",
         )
     })?;
     let encoded = value.strip_prefix(ACTION_PREFIX).ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidOperation,
-            "Button on_click must come from context.actions",
+            "Button on_click must come from actions",
         )
     })?;
     if encoded == "new" {
