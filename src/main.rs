@@ -24,9 +24,15 @@ impl ZellijPlugin for State {
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
         ]);
+        // TODO: also load from template_file
         self.template = configuration.get("template").cloned();
-        // Keep the plugin focusable so Zellij forwards mouse clicks to its buttons.
-        set_selectable(true);
+
+        // we dont need to be selectable, since we handle mouse clicks ourselves
+        // in fact, making the pane selectable causes a border to be drawn and for height=1 panes,
+        // this obscures the tab line, so we disable it here
+        set_selectable(false);
+
+        // subscribe to the events we care about
         subscribe(&[
             EventType::TabUpdate,
             EventType::ModeUpdate,
