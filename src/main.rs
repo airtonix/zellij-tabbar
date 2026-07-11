@@ -1,293 +1,97 @@
-mod line;
-mod tab;
-mod template;
+//! Zellij plugin shell: tracks host state, renders template frames, and dispatches clicks.
 
-use std::cmp::{max, min};
+mod render;
+
 use std::collections::BTreeMap;
-use std::convert::TryInto;
 
-use tab::get_tab_to_focus;
+use render::{ClickAction, RenderedFrame};
 use zellij_tile::prelude::*;
 
-use crate::line::tab_line;
-use crate::tab::tab_style;
-
-#[derive(Debug, Default)]
-pub struct LinePart {
-    part: String,
-    len: usize,
-    tab_index: Option<usize>,
-}
-
-impl LinePart {
-    pub fn append(&mut self, to_append: &LinePart) {
-        self.part.push_str(&to_append.part);
-        self.len += to_append.len;
-    }
-}
-
-#[derive(Default, Debug)]
+/// Host-facing plugin state. Rendering details stay inside the `render` module.
+#[derive(Default)]
 struct State {
     tabs: Vec<TabInfo>,
-    active_tab_idx: usize,
     mode_info: ModeInfo,
-    tab_line: Vec<LinePart>,
-    hide_swap_layout_indication: bool,
     template: Option<String>,
-    cached_keybinds: KeybindsVec,
-    active_pane_scroll: Option<(usize, usize)>,
-    new_tab_button_range: Option<(usize, usize)>,
-    hovered_tab_idx: Option<usize>,
-    hovered_new_tab_button: bool,
-    hint_text: Option<BTreeMap<usize, StyledText>>,
-    outstanding_hint_timeouts: usize,
+    frame: RenderedFrame,
 }
-
-static ARROW_SEPARATOR: &str = "";
 
 register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        request_permission(&[PermissionType::ReadApplicationState]);
-        self.hide_swap_layout_indication = configuration
-            .get("hide_swap_layout_indication")
-            .map(|s| s == "true")
-            .unwrap_or(false);
+        request_permission(&[
+            PermissionType::ReadApplicationState,
+            PermissionType::ChangeApplicationState,
+        ]);
         self.template = configuration.get("template").cloned();
-        set_selectable(false);
+        // Keep the plugin focusable so Zellij forwards mouse clicks to its buttons.
+        set_selectable(true);
         subscribe(&[
             EventType::TabUpdate,
             EventType::ModeUpdate,
             EventType::Mouse,
-            EventType::InitialKeybinds,
-            EventType::ActivePaneScroll,
-            EventType::HintText,
-            EventType::Timer,
-            EventType::InputReceived,
         ]);
     }
 
     fn update(&mut self, event: Event) -> bool {
-        let mut should_render = false;
         match event {
-            Event::InitialKeybinds(keybinds) => {
-                self.cached_keybinds = keybinds;
-                if !self.cached_keybinds.is_empty() {
-                    self.mode_info.keybinds = self.cached_keybinds.clone();
-                }
-                should_render = true;
-            },
-            Event::ModeUpdate(mut mode_info) => {
-                if mode_info.keybinds.is_empty() && !self.cached_keybinds.is_empty() {
-                    mode_info.keybinds = self.cached_keybinds.clone();
-                } else if !mode_info.keybinds.is_empty() {
-                    self.cached_keybinds = mode_info.keybinds.clone();
-                }
-                if self.mode_info != mode_info {
-                    should_render = true;
-                }
+            Event::ModeUpdate(mode_info) => {
+                let changed = self.mode_info != mode_info;
                 self.mode_info = mode_info;
+                changed && !self.tabs.is_empty()
             },
             Event::TabUpdate(tabs) => {
-                if let Some(active_tab_index) = tabs.iter().position(|t| t.active) {
-                    // tabs are indexed starting from 1 so we need to add 1
-                    let active_tab_idx = active_tab_index + 1;
-
-                    if self.active_tab_idx != active_tab_idx || self.tabs != tabs {
-                        should_render = true;
-                    }
-                    self.active_tab_idx = active_tab_idx;
-                    self.tabs = tabs;
-                } else {
-                    eprintln!("Could not find active tab.");
-                }
+                self.tabs = tabs;
+                // Always repaint: tab closure can produce an empty or otherwise equal-looking update.
+                true
             },
-            Event::ActivePaneScroll(scroll) => {
-                if self.active_pane_scroll != scroll {
-                    should_render = true;
-                }
-                self.active_pane_scroll = scroll;
-            },
-            Event::HintText(hint_variants) => {
-                if hint_variants.is_empty() {
-                    if self.hint_text.is_some() {
-                        self.hint_text = None;
-                        should_render = true;
-                    }
-                } else {
-                    self.hint_text = Some(hint_variants);
-                    self.outstanding_hint_timeouts += 1;
-                    set_timeout(5.0);
-                    should_render = true;
-                }
-            },
-            Event::Timer(_) => {
-                self.outstanding_hint_timeouts = self.outstanding_hint_timeouts.saturating_sub(1);
-                if self.outstanding_hint_timeouts == 0 && self.hint_text.is_some() {
-                    self.hint_text = None;
-                    should_render = true;
-                }
-            },
-            Event::InputReceived => {
-                if self.hint_text.is_some() {
-                    self.hint_text = None;
-                    should_render = true;
-                }
-            },
-            Event::Mouse(me) => match me {
-                Mouse::LeftClick(_, col) => {
-                    if let Some((start, end)) = self.new_tab_button_range {
-                        if col >= start && col < end {
+            Event::Mouse(Mouse::LeftClick(row, col)) => {
+                if let Some(action) = usize::try_from(row)
+                    .ok()
+                    .and_then(|row| self.frame.hitboxes.get(row))
+                    .and_then(|line| line.get(col))
+                    .and_then(Clone::clone)
+                {
+                    match action {
+                        ClickAction::SwitchTab(index) => switch_tab_to(index as u32),
+                        ClickAction::NewTab => {
                             new_tab::<&str>(None, None);
-                            return should_render;
-                        }
+                        },
                     }
-                    let tab_to_focus = get_tab_to_focus(&self.tab_line, self.active_tab_idx, col);
-                    if let Some(idx) = tab_to_focus {
-                        switch_tab_to(idx.try_into().unwrap());
-                    }
-                },
-                Mouse::Hover(_, col) => {
-                    let simplified_ui = self.mode_info.capabilities.arrow_fonts;
-                    let mut new_hovered_new_tab_button = false;
-                    let mut new_hovered_tab_idx = None;
-                    if !simplified_ui {
-                        if let Some((start, end)) = self.new_tab_button_range {
-                            if col >= start && col < end {
-                                new_hovered_new_tab_button = true;
-                            }
-                        }
-                        if !new_hovered_new_tab_button {
-                            new_hovered_tab_idx =
-                                get_tab_to_focus(&self.tab_line, self.active_tab_idx, col);
-                        }
-                    }
-                    if self.hovered_new_tab_button != new_hovered_new_tab_button
-                        || self.hovered_tab_idx != new_hovered_tab_idx
-                    {
-                        self.hovered_new_tab_button = new_hovered_new_tab_button;
-                        self.hovered_tab_idx = new_hovered_tab_idx;
-                        should_render = true;
-                    }
-                },
-                Mouse::ScrollUp(_) => {
-                    switch_tab_to(min(self.active_tab_idx + 1, self.tabs.len()) as u32);
-                },
-                Mouse::ScrollDown(_) => {
-                    switch_tab_to(max(self.active_tab_idx.saturating_sub(1), 1) as u32);
-                },
-                _ => {},
+                }
+                false
             },
-            _ => {
-                eprintln!("Got unrecognized event: {:?}", event);
-            },
+            _ => false,
         }
-        if self.tabs.is_empty() {
-            // no need to render if we have no tabs, this can sometimes happen on startup before we
-            // get the tab update and then we definitely don't want to render
-            should_render = false;
-        }
-        should_render
     }
 
-    fn render(&mut self, _rows: usize, cols: usize) {
+    fn render(&mut self, rows: usize, cols: usize) {
         if self.tabs.is_empty() {
-            return;
-        }
-        if let Some(template) = &self.template {
-            match template::render(
+            // Clear stale output after the final visible tab disappears.
+            self.frame = RenderedFrame::default();
+        } else {
+            let template = render::selected_template(self.template.as_deref());
+            self.frame = match render::render(
                 template,
                 self.mode_info.session_name.as_deref(),
                 &self.tabs,
-                cols.saturating_sub(1),
-                self.hovered_tab_idx,
+                rows,
+                cols,
                 self.mode_info.style.colors,
                 self.mode_info.capabilities,
             ) {
-                Ok(line) => self.tab_line = line,
-                Err(error) => {
-                    self.tab_line = vec![LinePart {
-                        part: format!("template error: {error}"),
-                        len: 0,
-                        tab_index: None,
-                    }];
-                },
-            }
-            self.new_tab_button_range = None;
-            let output = self
-                .tab_line
-                .iter()
-                .fold(String::new(), |output, part| output + &part.part);
-            print!("{output}");
-            return;
+                Ok(frame) => frame,
+                Err(error) => render::error_frame(&error, rows, cols),
+            };
         }
-        let mut all_tabs: Vec<LinePart> = vec![];
-        let mut active_tab_index = 0;
-        let mut is_alternate_tab = false;
-        for t in &mut self.tabs {
-            let mut tabname = t.name.clone();
-            if t.active && self.mode_info.mode == InputMode::RenameTab {
-                if tabname.is_empty() {
-                    tabname = String::from("Enter name...");
-                }
-                active_tab_index = t.position;
-            } else if t.active {
-                active_tab_index = t.position;
-            }
-            let is_hovered = self.hovered_tab_idx == Some(t.position + 1);
-            let tab = tab_style(
-                tabname,
-                t,
-                is_alternate_tab,
-                is_hovered,
-                self.mode_info.style.colors,
-                self.mode_info.capabilities,
-            );
-            is_alternate_tab = !is_alternate_tab;
-            all_tabs.push(tab);
-        }
-
-        let background = self.mode_info.style.colors.text_unselected.background;
-
-        let full_pane_frames = self.mode_info.pane_frame_style == Some(PaneFrameStyle::Full);
-        let hint_text = if full_pane_frames {
-            None
-        } else {
-            self.hint_text.as_ref()
-        };
-        let (line, new_tab_button_range) = tab_line(
-            self.mode_info.session_name.as_deref(),
-            all_tabs,
-            active_tab_index,
-            cols.saturating_sub(1),
-            self.mode_info.style.colors,
-            self.mode_info.capabilities,
-            self.mode_info.style.hide_session_name,
-            self.tabs.iter().find(|t| t.active),
-            &self.mode_info,
-            self.hide_swap_layout_indication,
-            &background,
-            self.active_pane_scroll,
-            hint_text,
-            is_alternate_tab,
-            self.hovered_new_tab_button,
-        );
-        self.tab_line = line;
-        self.new_tab_button_range = new_tab_button_range;
-
-        let output = self
-            .tab_line
-            .iter()
-            .fold(String::new(), |output, part| output + &part.part);
-
-        match background {
-            PaletteColor::Rgb((r, g, b)) => {
-                print!("{}\u{1b}[48;2;{};{};{}m\u{1b}[0K", output, r, g, b);
-            },
-            PaletteColor::EightBit(color) => {
-                print!("{}\u{1b}[48;5;{}m\u{1b}[0K", output, color);
-            },
-        }
+        let output = (0..rows)
+            .map(|row| {
+                let line = self.frame.lines.get(row).map_or("", String::as_str);
+                format!("\u{1b}[2K{line}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        print!("{output}");
     }
 }

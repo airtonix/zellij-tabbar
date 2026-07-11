@@ -3,9 +3,6 @@
 setup_file() {
   command -v zellij >/dev/null || skip "zellij is required"
   command -v python3 >/dev/null || skip "python3 is required"
-  local zellij_version
-  zellij_version="$(zellij --version | awk '{ print $2 }')"
-  [[ "$zellij_version" == 0.45.* ]] || skip "zellij 0.45.x is required by current zellij-tile ABI (found $zellij_version)"
   cargo build --release --target wasm32-wasip1
   export PLUGIN_WASM
   PLUGIN_WASM="$(realpath "$BATS_TEST_DIRNAME/../target/wasm32-wasip1/release/zellij-tabbar.wasm")"
@@ -17,8 +14,12 @@ setup() {
   CLIENT_PID=""
 }
 
+zellij_test() {
+  env ZELLIJ_SOCKET_DIR="$TEST_ROOT/socket" zellij "$@"
+}
+
 teardown() {
-  zellij kill-session "$SESSION" >/dev/null 2>&1 || true
+  zellij_test kill-session "$SESSION" >/dev/null 2>&1 || true
   if [[ -n "$CLIENT_PID" ]]; then
     kill "$CLIENT_PID" >/dev/null 2>&1 || true
     wait "$CLIENT_PID" 2>/dev/null || true
@@ -44,27 +45,28 @@ layout {
 }
 KDL
 
-  mkdir -p "$TEST_ROOT/cache/zellij"
-  cat >"$TEST_ROOT/cache/zellij/permissions.kdl" <<KDL
+  mkdir -p "$TEST_ROOT/home/.cache/zellij"
+  cat >"$TEST_ROOT/home/.cache/zellij/permissions.kdl" <<KDL
 "$PLUGIN_WASM" {
   ReadApplicationState
+  ChangeApplicationState
 }
 KDL
 
   env -u ZELLIJ -u ZELLIJ_SESSION_NAME -u ZELLIJ_PANE_ID \
-    TERM=xterm-256color XDG_CACHE_HOME="$TEST_ROOT/cache" PTY_LOG="$TEST_ROOT/client.log" \
+    TERM=xterm-256color HOME="$TEST_ROOT/home" XDG_CACHE_HOME="$TEST_ROOT/home/.cache" ZELLIJ_SOCKET_DIR="$TEST_ROOT/socket" PTY_LOG="$TEST_ROOT/client.log" \
     python3 "$BATS_TEST_DIRNAME/helpers/pty_client.py" \
     zellij --session "$SESSION" --new-session-with-layout "$TEST_ROOT/layout.kdl" &
   CLIENT_PID=$!
 
   local panes=""
   for _ in {1..50}; do
-    if panes="$(zellij --session "$SESSION" action list-panes 2>/dev/null)" \
+    if panes="$(zellij_test --session "$SESSION" action list-panes 2>/dev/null)" \
       && grep -q '^plugin_' <<<"$panes"; then
       PLUGIN_PANE="$(awk '$2 == "plugin" { print $1; exit }' <<<"$panes")"
-      zellij --session "$SESSION" action go-to-tab 1 >/dev/null
-      zellij --session "$SESSION" action focus-pane-id "$PLUGIN_PANE" >/dev/null
-      zellij --session "$SESSION" action rename-tab Alpha >/dev/null
+      zellij_test --session "$SESSION" action go-to-tab 1 >/dev/null
+      zellij_test --session "$SESSION" action focus-pane-id "$PLUGIN_PANE" >/dev/null
+      zellij_test --session "$SESSION" action rename-tab Alpha >/dev/null
       return
     fi
     sleep 0.1
@@ -78,14 +80,14 @@ KDL
 dump_plugin() {
   local output=""
   for _ in {1..30}; do
-    output="$(zellij --session "$SESSION" action dump-screen --pane-id "$PLUGIN_PANE")"
+    output="$(zellij_test --session "$SESSION" action dump-screen --pane-id "$PLUGIN_PANE")"
     if [[ -n "$output" ]]; then
       printf '%s\n' "$output"
       return
     fi
     sleep 0.1
   done
-  zellij --session "$SESSION" action list-panes >&2 || true
+  zellij_test --session "$SESSION" action list-panes >&2 || true
   return 1
 }
 
@@ -100,8 +102,8 @@ dump_plugin() {
   [[ "$output" == *"[2:Beta:false]"* ]]
 }
 
-@test "Stack and Flex place content at opposite viewport edges" {
-  start_plugin '{% call Stack() %}{% call Flex(justify="start") %}LEFT{% endcall %}{% call Flex(justify="end") %}RIGHT{% endcall %}{% endcall %}'
+@test "nested Flex places content at opposite viewport edges" {
+  start_plugin '{% call Flex(direction="row") %}{% call Flex(shrink=0) %}LEFT{% endcall %}{% call Flex(grow=1, justify="end") %}RIGHT{% endcall %}{% endcall %}'
 
   run dump_plugin
 
