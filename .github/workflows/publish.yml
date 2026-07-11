@@ -1,5 +1,5 @@
 name: Publish
-run-name: Publish ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
+run-name: Publish ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag || inputs.ref || 'main' }}
 
 on:
   workflow_dispatch:
@@ -8,9 +8,14 @@ on:
         description: "moon project id to publish"
         required: true
         type: string
+      ref:
+        description: "Git ref to publish"
+        required: false
+        default: main
+        type: string
       tag:
-        description: "GitHub release tag (for example zellij-tabbar-v0.2.0)"
-        required: true
+        description: "GitHub release tag; inferred from the ref manifest when omitted"
+        required: false
         type: string
   repository_dispatch:
     types: [publish-package]
@@ -23,7 +28,7 @@ permissions:
 
 concurrency:
   group: publish-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   publish:
@@ -34,12 +39,14 @@ jobs:
     env:
       PUBLISH_TARGET: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}
       PUBLISH_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
+      PUBLISH_REF: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_sha || inputs.ref || 'main' }}
     steps:
 
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          ref: ${{ env.PUBLISH_REF }}
 
       - name: Setup Toolchain
         uses: moonrepo/setup-toolchain@8794f0318b9df4a43a5ddc23cefd16f595b423dd # v0
@@ -92,6 +99,52 @@ jobs:
             exit 1
           fi
 
+          project_source="$(jq -r --arg target "${PUBLISH_TARGET}" '.projects[] | select(.id == $target) | .source' <<<"${projects_json}")"
+          echo "PUBLISH_PROJECT_SOURCE=${project_source}" >> "${GITHUB_ENV}"
+
+      - name: Resolve publish tag
+        if: env.PUBLISH_TAG == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          version="$(jq -r --arg source "${PUBLISH_PROJECT_SOURCE}" '.[$source] // empty' .release-please-manifest.json)"
+          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "ERROR: No stable version found for '${PUBLISH_PROJECT_SOURCE}' in .release-please-manifest.json." >&2
+            exit 1
+          fi
+
+          prefix="v${version}-alpha."
+          alpha="$(
+            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].tag_name' |
+              awk -v prefix="${prefix}" '
+                index($0, prefix) == 1 {
+                  n = substr($0, length(prefix) + 1)
+                  if (n ~ /^[0-9]+$/ && n > max) max = n
+                }
+                END { print max + 1 }
+              '
+          )"
+          tag="${prefix}${alpha}"
+
+          echo "PUBLISH_TAG=${tag}" >> "${GITHUB_ENV}"
+          echo "Inferred publish tag '${tag}' from ${PUBLISH_PROJECT_SOURCE} version ${version}."
+
+      - name: Ensure release exists
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          if ! gh release view "${PUBLISH_TAG}" >/dev/null 2>&1; then
+            gh release create "${PUBLISH_TAG}" \
+              --target "${PUBLISH_REF}" \
+              --title "${PUBLISH_TAG}" \
+              --prerelease \
+              --generate-notes
+          fi
+
       - name: Publish target(s)
         env:
           GH_TOKEN: ${{ github.token }}
@@ -103,7 +156,7 @@ jobs:
           PUBLISH_TAG: ${{ env.PUBLISH_TAG }}
         run: |
           set -euo pipefail
-          moon run ${PUBLISH_TARGET}:publish --force
+          moon run "${PUBLISH_TARGET}:publish" --force
       - name: Publish summary
         if: always()
         run: |
@@ -114,6 +167,7 @@ jobs:
             echo "| Field | Value |"
             echo "|---|---|"
             echo "| target | \`${PUBLISH_TARGET}\` |"
+            echo "| ref | \`${PUBLISH_REF}\` |"
             echo "| tag | \`${PUBLISH_TAG}\` |"
             echo "| trigger | \`${{ github.event_name }}\` |"
             echo "| result | \`${{ job.status }}\` |"
@@ -122,7 +176,7 @@ jobs:
       - name: Moon run report summary
         if: always()
         continue-on-error: true
-        uses: moonrepo/run-report-action@bfb317b1a2fd5b879d7c14d6d7af6360178fd879 # v1.9.0
+        uses: moonrepo/run-report-action@bbe7e99bf2aca819ec660ec01fc59d84bdd492d6 # v1.10.0
         with:
           access-token: ${{ github.token }}
           skip-comment: "true"
