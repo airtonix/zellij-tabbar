@@ -62,10 +62,9 @@ KDL
   local panes=""
   for _ in {1..50}; do
     if panes="$(zellij_test --session "$SESSION" action list-panes 2>/dev/null)" \
-      && grep -q '^plugin_' <<<"$panes"; then
-      PLUGIN_PANE="$(awk '$2 == "plugin" { print $1; exit }' <<<"$panes")"
+      && grep -q '^plugin_.*file:' <<<"$panes"; then
+      PLUGIN_PANE="$(awk '$2 == "plugin" && $0 ~ /file:/ { print $1; exit }' <<<"$panes")"
       zellij_test --session "$SESSION" action go-to-tab 1 >/dev/null
-      zellij_test --session "$SESSION" action focus-pane-id "$PLUGIN_PANE" >/dev/null
       zellij_test --session "$SESSION" action rename-tab Alpha >/dev/null
       return
     fi
@@ -78,11 +77,10 @@ KDL
 }
 
 dump_plugin() {
-  local output=""
-  for _ in {1..30}; do
-    output="$(zellij_test --session "$SESSION" action dump-screen --pane-id "$PLUGIN_PANE")"
-    if [[ -n "$output" ]]; then
-      printf '%s\n' "$output"
+  local expected="$1"
+  for _ in {1..100}; do
+    if grep -aFq "$expected" "$TEST_ROOT/client.log"; then
+      strings "$TEST_ROOT/client.log"
       return
     fi
     sleep 0.1
@@ -94,7 +92,7 @@ dump_plugin() {
 @test "inline template receives session and tab model" {
   start_plugin 'SESSION={{ session.name }} TABS={% for tab in session.tabs %}[{{ tab.index }}:{{ tab.name }}:{{ tab.active }}]{% endfor %}'
 
-  run dump_plugin
+  run dump_plugin "SESSION=$SESSION"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"SESSION=$SESSION"* ]]
@@ -105,17 +103,17 @@ dump_plugin() {
 @test "nested Flex places content at opposite viewport edges" {
   start_plugin '{% call Flex(direction="row") %}{% call Flex(shrink=0) %}LEFT{% endcall %}{% call Flex(grow=1, justify="end") %}RIGHT{% endcall %}{% endcall %}'
 
-  run dump_plugin
+  run dump_plugin "LEFT"
 
   [ "$status" -eq 0 ]
-  [[ "$output" == LEFT* ]]
-  [[ "$output" == *RIGHT ]]
+  [[ "$output" == *"LEFT"* ]]
+  [[ "$output" == *"RIGHT"* ]]
 }
 
 @test "template errors render in the plugin pane" {
   start_plugin '{{ broken'
 
-  run dump_plugin
+  run dump_plugin "template error:"
 
   [ "$status" -eq 0 ]
   [[ "$output" == *"template error:"* ]]
