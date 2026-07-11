@@ -62,7 +62,38 @@ layout {
 }
 ```
 
-On first launch, grant the requested permissions. The plugin needs application-state access for tab data and application-change access for button actions.
+## Grant permissions
+
+The plugin needs:
+
+- `ReadApplicationState` for session and tab data
+- `ChangeApplicationState` for tab and new-tab button actions
+
+Zellij normally displays an interactive permission request. A one-row tab bar cannot show the full request, so add the grant to Zellij's permission cache before starting the plugin.
+
+Open `${XDG_CACHE_HOME:-$HOME/.cache}/zellij/permissions.kdl` and add a block keyed by the absolute WASM path:
+
+```kdl
+"/home/you/.config/zellij/plugins/zellij-tabbar.wasm" {
+    ReadApplicationState
+    ChangeApplicationState
+}
+```
+
+Create the directory and file when they do not exist:
+
+```bash
+mkdir -p "${XDG_CACHE_HOME:-$HOME/.cache}/zellij"
+touch "${XDG_CACHE_HOME:-$HOME/.cache}/zellij/permissions.kdl"
+```
+
+The path must exactly match the plugin path Zellij resolves. Use this to obtain it:
+
+```bash
+realpath ~/.config/zellij/plugins/zellij-tabbar.wasm
+```
+
+Restart the Zellij session after changing the cache. Remove this block when you want Zellij to request permission again.
 
 ## Default layout
 
