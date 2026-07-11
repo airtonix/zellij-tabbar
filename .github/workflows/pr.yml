@@ -1,0 +1,46 @@
+name: PR
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+
+      - name: SetupToolchain
+        uses: moonrepo/setup-toolchain@8794f0318b9df4a43a5ddc23cefd16f595b423dd # v0
+        with:
+          auto-install: true
+          auto-setup: true
+
+      - name: RestoreMoonCache
+        uses: ./.github/actions/moon-cache
+        with:
+          key-prefix: moon-pr
+          cache-version: v1
+
+      - name: RunChecks
+        run: |
+          moon run :check --affected
+          moon run :test --affected
+          moon run :build --affected
+
+      - name: MoonRunReport
+        if: always()
+        uses: moonrepo/run-report-action@bbe7e99bf2aca819ec660ec01fc59d84bdd492d6 # v1.10.0
+        with:
+          access-token: ${{ secrets.GITHUB_TOKEN }}

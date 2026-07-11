@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+payload_arg="${1:-}"
+base="${2:-}"
+head="${3:-}"
+
+if [[ "${payload_arg}" == @* ]]; then
+  payload="$(cat "${payload_arg#@}")"
+else
+  payload="${payload_arg}"
+fi
+
+jq -e . >/dev/null <<<"${payload}"
+[[ -n "${base}" && -n "${head}" ]] || { echo "Missing base/head ref" >&2; exit 1; }
+
+if [[ "$(jq -r '.releases_created // false' <<<"${payload}")" != "true" ]]; then
+  echo '[]'
+  exit 0
+fi
+
+tag="$(jq -r 'to_entries | map(select(.key | endswith("--tag_name"))) | first.value // empty' <<<"${payload}")"
+[[ -n "${tag}" ]] || { echo "Release created without tag_name output" >&2; exit 1; }
+
+affected="$(MOON_BASE="${base}" MOON_HEAD="${head}" moon query projects --affected)"
+jq -c --arg tag "${tag}" '
+  [
+    .projects[]
+    | select((.tasks // {}) | has("publish"))
+    | { target: .id, tag: $tag, mode: "latest", version: "" }
+  ]
+  | sort_by(.target)
+' <<<"${affected}"
