@@ -67,7 +67,7 @@ Values are renderer colour tokens shaped as `rgb:R,G,B` or `index:N` and can be 
 
 ## Template sources
 
-The renderer accepts inline source as `&str` or a named template from a preconfigured MiniJinja `Environment`. It deliberately does not decide where templates come from.
+The renderer accepts inline source as `&str`, a named template from a preconfigured MiniJinja `Environment`, or a filesystem environment built with `file_template_environment`.
 
 Use these terms consistently:
 
@@ -79,12 +79,12 @@ An embedded template is no longer read from disk at runtime. `minijinja-embed` p
 
 ### Ownership boundary
 
-The plugin host owns template selection and filesystem access. This crate owns template evaluation and terminal layout.
+The plugin host owns template selection and maps host paths into its filesystem namespace. This crate owns template loading, MiniJinja caching, evaluation, and terminal layout.
 
 ```text
 plugin configuration
   ├─ inline template ─────────────────────→ Renderer::render(...)
-  ├─ external template → read from host ──→ Renderer::render(...)
+  ├─ external template → file environment → Renderer::render_named(...)
   └─ no override → embedded environment ──→ Renderer::render_named(...)
 ```
 
@@ -108,23 +108,28 @@ renderer.render_named(environment, "main.jinja", data, viewport, present_button)
 
 The consuming plugin needs `minijinja` and `minijinja-embed` as normal dependencies, plus `minijinja-embed` as a build dependency.
 
-A native host can load an external template with `std::fs::read_to_string`. A Zellij WASI plugin reads files through its `/host` mount, so path interpretation and required Zellij permissions remain host concerns:
+Build an external environment with a host-provided reader:
 
 ```rust
-use std::path::Path;
+use zellij_template_render::file_template_environment;
 
-let source = std::fs::read_to_string(Path::new("/host").join(configured_path))?;
+let (mut environment, entry) = file_template_environment(
+    configured_path.into(),
+    home_directory,
+    |path| std::fs::read_to_string(path),
+)?;
+renderer.render_named_mut(&mut environment, &entry, data, viewport, present_button)?;
 ```
+
+The environment validates the entry immediately. Includes, imports, and inheritance resolve relative to the including file. MiniJinja loads each template name once and caches it for the environment lifetime. The reader controls host path mapping; a Zellij WASI plugin maps host paths through `/host` and requests `FullHdAccess`.
 
 Host implementations should:
 
 - reject configuration containing both inline and external template settings
-- load external templates once during plugin load unless hot reload is explicitly required
+- create one external environment during plugin load unless hot reload is explicitly required
 - report read and parse failures instead of silently falling back to the embedded default
 - define whether configured paths are relative to Zellij's host folder; arbitrary absolute host paths can require `/host` remapping and `FullHdAccess`
 
 ### Includes and inheritance
 
-Basic external file loading still requires no renderer-specific abstraction: read the file, then pass its contents to `Renderer::render`.
-
-Embedded `{% include %}`, `{% extends %}`, and import relationships work through `Renderer::render_named` when every referenced template is present in the loaded bundle. Runtime template directories can use the same method with `Environment::set_loader` or `minijinja::path_loader`.
+Embedded `{% include %}`, `{% extends %}`, and import relationships work through `Renderer::render_named` when every referenced template is present in the loaded bundle. Filesystem relationships use `file_template_environment`; template paths are unrestricted, so callers must treat external templates as trusted input.

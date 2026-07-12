@@ -4,7 +4,7 @@ mod render;
 
 use std::collections::BTreeMap;
 
-use render::{ClickAction, RenderedFrame, TabBarRenderer};
+use render::{ClickAction, RenderedFrame, TabBarRenderer, TemplateSource};
 use zellij_tile::prelude::*;
 
 /// Host-facing plugin state. Rendering details stay inside the `render` module.
@@ -12,7 +12,7 @@ use zellij_tile::prelude::*;
 struct State {
     tabs: Vec<TabInfo>,
     mode_info: ModeInfo,
-    template: Option<String>,
+    template: TemplateSource,
     frame: RenderedFrame,
     tabbar_renderer: TabBarRenderer,
     timer_armed: bool,
@@ -22,12 +22,15 @@ register_plugin!(State);
 
 impl ZellijPlugin for State {
     fn load(&mut self, configuration: BTreeMap<String, String>) {
-        request_permission(&[
+        let mut permissions = vec![
             PermissionType::ReadApplicationState,
             PermissionType::ChangeApplicationState,
-        ]);
-        // TODO: also load from template_file
-        self.template = configuration.get("template").cloned();
+        ];
+        if configuration.contains_key("template_file") {
+            permissions.push(PermissionType::FullHdAccess);
+        }
+        request_permission(&permissions);
+        self.template = TemplateSource::from_configuration(&configuration);
 
         // we dont need to be selectable, since we handle mouse clicks ourselves
         // in fact, making the pane selectable causes a border to be drawn and for height=1 panes,
@@ -85,7 +88,7 @@ impl ZellijPlugin for State {
             self.frame = RenderedFrame::default();
         } else {
             self.frame = match self.tabbar_renderer.render(
-                self.template.as_deref(),
+                &mut self.template,
                 self.mode_info.session_name.as_deref(),
                 &self.tabs,
                 rows,

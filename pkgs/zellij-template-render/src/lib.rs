@@ -3,6 +3,7 @@
 //! Hosts provide template data, typed actions, and button presentation policy.
 //! The renderer owns template helpers, layout, clipping, and click hitboxes.
 
+mod file_template;
 mod layout;
 mod template;
 
@@ -10,6 +11,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+pub use file_template::environment as file_template_environment;
 pub use minijinja::{context, Environment, Error, ErrorKind, Value};
 use unicode_width::UnicodeWidthChar;
 
@@ -137,6 +139,28 @@ where
     where
         F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
     {
+        let mut environment = environment;
+        self.render_named_mut(
+            &mut environment,
+            template_name,
+            data,
+            viewport,
+            present_button,
+        )
+    }
+
+    /// Renders from a retained environment so lazy-loaded templates stay cached.
+    pub fn render_named_mut<F>(
+        &self,
+        environment: &mut Environment<'_>,
+        template_name: &str,
+        data: Value,
+        viewport: Viewport,
+        present_button: F,
+    ) -> Result<Frame<A>, Error>
+    where
+        F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
+    {
         if viewport.rows == 0 || viewport.cols == 0 {
             return Ok(Frame::default());
         }
@@ -195,6 +219,10 @@ fn layout_error(message: impl Into<String>) -> Error {
 
 #[cfg(test)]
 mod tests {
+    use std::io;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
     use super::*;
 
     #[derive(Clone, Debug, PartialEq, Eq)]
@@ -267,6 +295,49 @@ mod tests {
         assert!(frame
             .refresh_after
             .is_some_and(|delay| { !delay.is_zero() && delay <= Duration::from_secs(1) }));
+    }
+
+    #[test]
+    fn retained_environment_caches_lazy_includes_across_renders() {
+        let reads = Arc::new(Mutex::new(Vec::new()));
+        let reader_reads = Arc::clone(&reads);
+        let files = BTreeMap::from([
+            (
+                PathBuf::from("/templates/main.jinja"),
+                "{% include 'part.jinja' %}",
+            ),
+            (PathBuf::from("/templates/part.jinja"), "part"),
+        ]);
+        let (mut environment, entry) = file_template_environment(
+            PathBuf::from("/templates/main.jinja"),
+            None,
+            move |path: &Path| {
+                reader_reads.lock().unwrap().push(path.to_path_buf());
+                files
+                    .get(path)
+                    .map(|source| source.to_string())
+                    .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "missing template"))
+            },
+        )
+        .unwrap();
+        let renderer = Renderer::new(ActionRegistry::<TestAction>::new());
+        for _ in 0..2 {
+            renderer
+                .render_named_mut(
+                    &mut environment,
+                    &entry,
+                    context! {},
+                    Viewport { rows: 1, cols: 4 },
+                    |button| {
+                        Ok(ButtonPresentation {
+                            label: button.label.to_string(),
+                            focused: button.focused.unwrap_or(false),
+                        })
+                    },
+                )
+                .unwrap();
+        }
+        assert_eq!(reads.lock().unwrap().len(), 2);
     }
 
     #[test]

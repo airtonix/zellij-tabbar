@@ -1,11 +1,15 @@
 //! Tabbar-specific template data, actions, and button styling.
 
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use ansi_term::ANSIStrings;
 use chrono::Local;
 use serde::Serialize;
 use zellij_template_render::{
-    context, error_frame as render_error_frame, ActionRegistry, ButtonPresentation, ButtonView,
-    Environment, Error, ErrorKind, Frame, Renderer, Value, Viewport,
+    context, error_frame as render_error_frame, file_template_environment, ActionRegistry,
+    ButtonPresentation, ButtonView, Environment, Error, ErrorKind, Frame, Renderer, Value,
+    Viewport,
 };
 use zellij_tile::prelude::*;
 use zellij_tile_utils::style;
@@ -21,6 +25,71 @@ pub(crate) enum ClickAction {
 }
 
 pub(crate) type RenderedFrame = Frame<ClickAction>;
+
+/// Template selected from plugin configuration.
+#[derive(Default)]
+pub(crate) enum TemplateSource {
+    #[default]
+    Embedded,
+    Inline(String),
+    External {
+        environment: Box<Environment<'static>>,
+        entry: String,
+    },
+    Invalid(String),
+}
+
+impl TemplateSource {
+    pub(crate) fn from_configuration(configuration: &BTreeMap<String, String>) -> Self {
+        match (
+            configuration.get("template"),
+            configuration.get("template_file"),
+        ) {
+            (Some(_), Some(_)) => Self::Invalid(
+                "template and template_file cannot be configured together".to_string(),
+            ),
+            (Some(source), None) => Self::Inline(source.clone()),
+            (None, Some(path)) => match load_external_template(path) {
+                Ok((environment, entry)) => Self::External {
+                    environment: Box::new(environment),
+                    entry,
+                },
+                Err(error) => Self::Invalid(error.to_string()),
+            },
+            (None, None) => Self::Embedded,
+        }
+    }
+}
+
+fn load_external_template(path: &str) -> Result<(Environment<'static>, String), Error> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let mut entry = PathBuf::from(path);
+    if entry.is_relative() && !entry.starts_with("~") {
+        let config_dir = std::env::var_os("ZELLIJ_CONFIG_DIR")
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|home| home.join(".config/zellij")))
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidOperation,
+                    "relative template_file requires ZELLIJ_CONFIG_DIR or HOME",
+                )
+            })?;
+        entry = config_dir.join(entry);
+    }
+    file_template_environment(entry, home, |path| {
+        std::fs::read_to_string(plugin_host_path(path))
+    })
+}
+
+#[cfg(target_arch = "wasm32")]
+fn plugin_host_path(path: &Path) -> PathBuf {
+    Path::new("/host").join(path.strip_prefix("/").unwrap_or(path))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn plugin_host_path(path: &Path) -> PathBuf {
+    path.to_path_buf()
+}
 
 /// Long-lived tabbar renderer owned by the plugin state.
 pub(crate) struct TabBarRenderer {
@@ -87,7 +156,7 @@ impl TabBarRenderer {
     /// Renders tabbar data through the shared template renderer.
     pub(crate) fn render(
         &self,
-        template: Option<&str>,
+        template: &mut TemplateSource,
         session_name: Option<&str>,
         tabs: &[TabInfo],
         rows: usize,
@@ -123,10 +192,18 @@ impl TabBarRenderer {
         };
         let viewport = Viewport { rows, cols };
         match template {
-            Some(source) => self.renderer.render(source, data, viewport, move |button| {
-                present_button(button, &tabs, colors, capabilities)
-            }),
-            None => {
+            TemplateSource::Inline(source) => {
+                self.renderer.render(source, data, viewport, move |button| {
+                    present_button(button, &tabs, colors, capabilities)
+                })
+            },
+            TemplateSource::External { environment, entry } => {
+                self.renderer
+                    .render_named_mut(environment, entry, data, viewport, move |button| {
+                        present_button(button, &tabs, colors, capabilities)
+                    })
+            },
+            TemplateSource::Embedded => {
                 let mut environment = Environment::new();
                 minijinja_embed::load_templates!(&mut environment);
                 self.renderer.render_named(
@@ -136,6 +213,9 @@ impl TabBarRenderer {
                     viewport,
                     move |button| present_button(button, &tabs, colors, capabilities),
                 )
+            },
+            TemplateSource::Invalid(message) => {
+                Err(Error::new(ErrorKind::InvalidOperation, message.clone()))
             },
         }
     }
@@ -292,6 +372,19 @@ mod tests {
     }
 
     #[test]
+    fn conflicting_template_settings_are_rejected() {
+        let configuration = BTreeMap::from([
+            ("template".to_string(), "inline".to_string()),
+            ("template_file".to_string(), "/tmp/main.jinja".to_string()),
+        ]);
+        assert!(matches!(
+            TemplateSource::from_configuration(&configuration),
+            TemplateSource::Invalid(message)
+                if message == "template and template_file cannot be configured together"
+        ));
+    }
+
+    #[test]
     fn default_template_renders_buttons_and_actions() {
         let mut first = TabInfo {
             name: "one".into(),
@@ -307,7 +400,7 @@ mod tests {
         let mode = ModeInfo::default();
         let frame = TabBarRenderer::new()
             .render(
-                None,
+                &mut TemplateSource::Embedded,
                 Some("demo"),
                 &[first, second],
                 1,
@@ -336,7 +429,7 @@ mod tests {
 
         let frame = renderer
             .render(
-                Some(r#"{{ "x" | fg(theme.text) }}"#),
+                &mut TemplateSource::Inline(r#"{{ "x" | fg(theme.text) }}"#.to_string()),
                 None,
                 &[],
                 1,
@@ -349,7 +442,7 @@ mod tests {
 
         let error = renderer
             .render(
-                Some(r#"{{ "x" | fg(context.theme.text) }}"#),
+                &mut TemplateSource::Inline(r#"{{ "x" | fg(context.theme.text) }}"#.to_string()),
                 None,
                 &[],
                 1,
@@ -370,7 +463,7 @@ mod tests {
         };
         let mode = ModeInfo::default();
         let frame = TabBarRenderer::new().render(
-            Some(r#"{% call Flex(overflow="scroll") %}{% call Button(on_click=actions.switch_tab(1)) %}one{% endcall %}{% endcall %}"#),
+            &mut TemplateSource::Inline(r#"{% call Flex(overflow="scroll") %}{% call Button(on_click=actions.switch_tab(1)) %}one{% endcall %}{% endcall %}"#.to_string()),
             None,
             &[tab],
             1,

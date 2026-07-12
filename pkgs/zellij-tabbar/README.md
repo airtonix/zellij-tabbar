@@ -68,6 +68,7 @@ The plugin needs:
 
 - `ReadApplicationState` for session and tab data
 - `ChangeApplicationState` for tab and new-tab button actions
+- `FullHdAccess` when `template_file` loads templates from the host filesystem
 
 Zellij normally displays an interactive permission request. A one-row tab bar cannot show the full request, so add the grant to Zellij's permission cache before starting the plugin.
 
@@ -136,7 +137,17 @@ plugin location="file:/home/you/.config/zellij/plugins/zellij-tabbar.wasm" {
 }
 ```
 
-Invalid templates render a visible `template error:` message instead of silently using the default.
+Or set `template_file` to a host filesystem path:
+
+```kdl
+plugin location="file:/home/you/.config/zellij/plugins/zellij-tabbar.wasm" {
+    template_file "tabbar/main.jinja"
+}
+```
+
+Relative paths use `${ZELLIJ_CONFIG_DIR:-$HOME/.config/zellij}`. Absolute paths and `~` are supported. Includes, imports, and inheritance resolve relative to the including file, load lazily, and remain cached until the plugin reloads. External templates are trusted: they can read any host file available to the plugin. `template` and `template_file` cannot be used together.
+
+Invalid configuration, unreadable files, and template failures render a visible `template error:` message instead of silently using the default.
 
 ## Template data
 

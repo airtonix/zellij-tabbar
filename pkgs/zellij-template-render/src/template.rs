@@ -100,8 +100,9 @@ where
     A: Clone + Send + 'static,
     F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
 {
+    let mut environment = Environment::new();
     render_tree_in(
-        Environment::new(),
+        &mut environment,
         TemplateTarget::Source(template),
         data,
         actions,
@@ -110,7 +111,7 @@ where
 }
 
 pub(super) fn render_named_tree<'source, A, F>(
-    environment: Environment<'source>,
+    environment: &mut Environment<'source>,
     template_name: &str,
     data: Value,
     actions: &ActionRegistry<A>,
@@ -135,7 +136,7 @@ enum TemplateTarget<'a> {
 }
 
 fn render_tree_in<'source, A, F>(
-    mut env: Environment<'source>,
+    env: &mut Environment<'source>,
     target: TemplateTarget<'_>,
     data: Value,
     actions: &ActionRegistry<A>,
