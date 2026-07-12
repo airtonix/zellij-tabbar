@@ -3,6 +3,7 @@ projects:
   sources:
     repo: "."
     zellij-tabbar: "pkgs/zellij-tabbar"
+    zellij-template-render: "pkgs/zellij-template-render"
 
 vcs:
   defaultBranch: "main"

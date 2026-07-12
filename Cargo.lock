@@ -2546,12 +2546,19 @@ version = "0.1.0"
 dependencies = [
  "ansi_term",
  "chrono",
- "colored",
- "minijinja",
  "serde",
- "unicode-width",
+ "zellij-template-render",
  "zellij-tile",
  "zellij-tile-utils",
+]
+
+[[package]]
+name = "zellij-template-render"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "minijinja",
+ "unicode-width",
 ]
 
 [[package]]

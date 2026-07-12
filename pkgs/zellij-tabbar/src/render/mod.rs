@@ -1,16 +1,25 @@
-//! Template rendering, Flex layout, button styling, and click-hitbox generation.
-//!
-//! Templates produce an internal layout tree. Layout turns that tree into a
-//! viewport-sized frame whose text cells and click actions share coordinates.
+//! Tabbar-specific template data, actions, and button styling.
 
-mod layout;
-mod template;
-
-use minijinja::{Error, ErrorKind};
-use unicode_width::UnicodeWidthChar;
+use ansi_term::ANSIStrings;
+use chrono::Local;
+use serde::Serialize;
+use zellij_template_render::{
+    context, error_frame as render_error_frame, ActionRegistry, ButtonPresentation, ButtonView,
+    Error, ErrorKind, Frame, Renderer, Value, Viewport,
+};
 use zellij_tile::prelude::*;
+use zellij_tile_utils::style;
 
-use self::template::DEFAULT_TEMPLATE;
+/// Built-in template used when plugin configuration provides no override.
+const DEFAULT_TEMPLATE: &str = r#"{%- call Flex(direction="row") -%}
+{%- call Flex(shrink=0) -%}{{ session.name }} {% endcall -%}
+{%- call Flex(direction="row", grow=1, shrink=1, overflow="scroll") -%}
+{%- for tab in session.tabs -%}
+{%- call Button(on_click=actions.switch_tab(tab.index), focused=tab.active) -%}{{ tab.name }}{%- endcall -%}
+{%- endfor -%}
+{%- endcall -%}
+{%- call Button(on_click=actions.new_tab()) -%}+{%- endcall -%}
+{%- endcall -%}"#;
 
 /// Typed operation attached to cells rendered by `Button`.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,11 +28,30 @@ pub(crate) enum ClickAction {
     NewTab,
 }
 
-/// Viewport output and its coordinate-matched click targets.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct RenderedFrame {
-    pub lines: Vec<String>,
-    pub hitboxes: Vec<Vec<Option<ClickAction>>>,
+pub(crate) type RenderedFrame = Frame<ClickAction>;
+
+#[derive(Serialize)]
+struct TemplateSession<'a> {
+    name: &'a str,
+    tabs: Vec<TemplateTab<'a>>,
+}
+
+#[derive(Serialize)]
+struct TemplateTab<'a> {
+    name: &'a str,
+    index: usize,
+    active: bool,
+}
+
+#[derive(Serialize)]
+struct TemplateTheme {
+    text: String,
+    background: String,
+    active_text: String,
+    active_background: String,
+    muted_text: String,
+    muted_background: String,
+    alert: String,
 }
 
 /// Chooses configured template, falling back to the built-in template.
@@ -31,7 +59,7 @@ pub(crate) fn selected_template(override_template: Option<&str>) -> &str {
     override_template.unwrap_or(DEFAULT_TEMPLATE)
 }
 
-/// Renders template and context into terminal lines plus two-dimensional hitboxes.
+/// Renders tabbar data through the shared template renderer.
 pub(crate) fn render(
     template: &str,
     session_name: Option<&str>,
@@ -41,40 +69,165 @@ pub(crate) fn render(
     colors: Styling,
     capabilities: PluginCapabilities,
 ) -> Result<RenderedFrame, Error> {
-    if rows == 0 || cols == 0 {
-        return Ok(RenderedFrame::default());
-    }
-    let root = template::render_tree(template, session_name, tabs, colors, capabilities)?;
-    Ok(layout::layout(&root, cols, rows)?.into_frame())
-}
-
-/// Produces visible, clipped output for template or layout failures.
-pub(crate) fn error_frame(error: &Error, rows: usize, cols: usize) -> RenderedFrame {
-    let text = format!("template error: {error}");
-    let clipped: String = text
-        .chars()
-        .scan(0usize, |width, ch| {
-            let next = *width + UnicodeWidthChar::width(ch).unwrap_or(0);
-            if next > cols {
-                None
-            } else {
-                *width = next;
-                Some(ch)
-            }
+    let actions = ActionRegistry::new()
+        .with("switch_tab", |args| {
+            let index = args.first().and_then(Value::as_usize).ok_or_else(|| {
+                Error::new(
+                    ErrorKind::InvalidOperation,
+                    "switch_tab expects an integer index",
+                )
+            })?;
+            Ok(ClickAction::SwitchTab(index))
         })
-        .collect();
-    let mut hitboxes = vec![vec![None; cols]; rows.min(1)];
-    if rows == 0 {
-        hitboxes.clear();
-    }
-    RenderedFrame {
-        lines: if rows == 0 { vec![] } else { vec![clipped] },
-        hitboxes,
-    }
+        .with("new_tab", |args| {
+            if !args.is_empty() {
+                return Err(Error::new(
+                    ErrorKind::InvalidOperation,
+                    "new_tab expects no arguments",
+                ));
+            }
+            Ok(ClickAction::NewTab)
+        });
+    let model = TemplateSession {
+        name: session_name.unwrap_or_default(),
+        tabs: tabs
+            .iter()
+            .map(|tab| TemplateTab {
+                name: &tab.name,
+                index: tab.position + 1,
+                active: tab.active,
+            })
+            .collect(),
+    };
+    let theme = TemplateTheme {
+        text: color_token(colors.text_unselected.base),
+        background: color_token(colors.text_unselected.background),
+        active_text: color_token(colors.ribbon_selected.base),
+        active_background: color_token(colors.ribbon_selected.background),
+        muted_text: color_token(colors.ribbon_unselected.base),
+        muted_background: color_token(colors.ribbon_unselected.background),
+        alert: color_token(colors.ribbon_unselected.emphasis_3),
+    };
+    let tabs = tabs.to_vec();
+    Renderer::new(actions).render(
+        template,
+        context! {
+            session => model,
+            system => context! { time => Local::now().timestamp() },
+            context => context! { theme => theme },
+        },
+        Viewport { rows, cols },
+        move |button| present_button(button, &tabs, colors, capabilities),
+    )
 }
 
-pub(super) fn layout_error(message: impl Into<String>) -> Error {
-    Error::new(ErrorKind::InvalidOperation, message.into())
+pub(crate) fn error_frame(error: &Error, rows: usize, cols: usize) -> RenderedFrame {
+    render_error_frame(error, Viewport { rows, cols })
+}
+
+fn present_button(
+    button: ButtonView<'_, ClickAction>,
+    tabs: &[TabInfo],
+    colors: Styling,
+    capabilities: PluginCapabilities,
+) -> Result<ButtonPresentation, Error> {
+    let focused = button.focused.unwrap_or_else(|| match button.action {
+        ClickAction::SwitchTab(index) => tabs
+            .iter()
+            .any(|tab| tab.active && tab.position + 1 == *index),
+        ClickAction::NewTab => false,
+    });
+    Ok(ButtonPresentation {
+        label: style_button(
+            button.label,
+            button.action,
+            focused,
+            tabs,
+            colors,
+            capabilities,
+        )?,
+        focused,
+    })
+}
+
+fn style_button(
+    label: &str,
+    action: &ClickAction,
+    focused: bool,
+    tabs: &[TabInfo],
+    palette: Styling,
+    capabilities: PluginCapabilities,
+) -> Result<String, Error> {
+    let separator = if capabilities.arrow_fonts { "" } else { "" };
+    let label = match action {
+        ClickAction::SwitchTab(index) => {
+            let tab = find_tab(tabs, *index)?;
+            let mut label = label.to_string();
+            if tab.is_fullscreen_active {
+                label.push_str(" (FULLSCREEN)");
+            } else if tab.is_sync_panes_active {
+                label.push_str(" (SYNC)");
+            }
+            if tab.has_bell_notification || tab.is_flashing_bell {
+                label.push_str(" [!]");
+            }
+            label
+        },
+        ClickAction::NewTab => label.to_string(),
+    };
+    let alternate = match action {
+        ClickAction::SwitchTab(index) => index % 2 == 0 && capabilities.arrow_fonts,
+        ClickAction::NewTab => tabs.len() % 2 == 1 && capabilities.arrow_fonts,
+    };
+    let background = if focused {
+        palette.ribbon_selected.background
+    } else if alternate {
+        palette.ribbon_unselected.emphasis_1
+    } else {
+        palette.ribbon_unselected.background
+    };
+    let foreground = match action {
+        ClickAction::SwitchTab(index) => {
+            let tab = find_tab(tabs, *index)?;
+            if tab.is_flashing_bell || tab.has_bell_notification {
+                if focused {
+                    palette.ribbon_selected.emphasis_3
+                } else {
+                    palette.ribbon_unselected.emphasis_3
+                }
+            } else if focused {
+                palette.ribbon_selected.base
+            } else {
+                palette.ribbon_unselected.base
+            }
+        },
+        ClickAction::NewTab => palette.ribbon_unselected.base,
+    };
+    let fill = palette.text_unselected.background;
+    let left = style!(fill, background).paint(separator);
+    let text = style!(foreground, background)
+        .bold()
+        .paint(format!(" {} ", label));
+    let right = style!(background, fill).paint(separator);
+    Ok(ANSIStrings(&[left, text, right]).to_string())
+}
+
+fn find_tab(tabs: &[TabInfo], index: usize) -> Result<&TabInfo, Error> {
+    tabs.iter()
+        .find(|tab| tab.position + 1 == index)
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::InvalidOperation,
+                "switch_tab index does not exist",
+            )
+        })
+}
+
+fn color_token(color: PaletteColor) -> String {
+    match color {
+        PaletteColor::Rgb((r, g, b)) => format!("rgb:{r},{g},{b}"),
+        PaletteColor::EightBit(index) => format!("index:{index}"),
+    }
 }
 
 #[cfg(test)]
@@ -86,12 +239,36 @@ mod tests {
         let mut chars = value.chars().peekable();
         while let Some(ch) = chars.next() {
             if ch == '\u{1b}' {
-                layout::consume_ansi(&mut chars, &mut String::new()).unwrap();
+                consume_ansi(&mut chars);
             } else {
                 output.push(ch);
             }
         }
         output
+    }
+
+    fn consume_ansi(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) {
+        match chars.next() {
+            Some('[') => {
+                for ch in chars.by_ref() {
+                    if ('@'..='~').contains(&ch) {
+                        break;
+                    }
+                }
+            },
+            Some(']') => {
+                while let Some(ch) = chars.next() {
+                    if ch == '\u{7}' {
+                        break;
+                    }
+                    if ch == '\u{1b}' && chars.peek() == Some(&'\\') {
+                        chars.next();
+                        break;
+                    }
+                }
+            },
+            _ => {},
+        }
     }
 
     #[test]
@@ -134,10 +311,25 @@ mod tests {
     }
 
     #[test]
-    fn malformed_template_gets_visible_error_frame() {
-        let error = layout_error("bad layout");
-        let frame = error_frame(&error, 1, 80);
-        assert!(frame.lines[0].contains("template error:"));
-        assert!(frame.lines[0].contains("bad layout"));
+    fn missing_explicit_focus_still_follows_active_tab() {
+        let tab = TabInfo {
+            name: "one".into(),
+            active: true,
+            ..TabInfo::default()
+        };
+        let mode = ModeInfo::default();
+        let frame = render(
+            r#"{% call Flex(overflow="scroll") %}{% call Button(on_click=actions.switch_tab(1)) %}one{% endcall %}{% endcall %}"#,
+            None,
+            &[tab],
+            1,
+            3,
+            mode.style.colors,
+            PluginCapabilities { arrow_fonts: true },
+        )
+        .unwrap();
+        assert!(frame.hitboxes[0]
+            .iter()
+            .any(|action| action == &Some(ClickAction::SwitchTab(1))));
     }
 }

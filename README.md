@@ -7,6 +7,7 @@ Plugins and shared libraries for [Zellij](https://zellij.dev/).
 | Package | Description |
 |---|---|
 | [`zellij-tabbar`](pkgs/zellij-tabbar) | Focusable, template-driven tab bar plugin |
+| [`zellij-template-render`](pkgs/zellij-template-render) | Reusable template, terminal layout, and typed hitbox renderer |
 
 Package READMEs contain installation, configuration, and usage documentation.
 
@@ -37,5 +38,6 @@ moon run repo:install
 
 ```text
 pkgs/
-└── zellij-tabbar/
+├── zellij-tabbar/
+└── zellij-template-render/
 ```

@@ -1,0 +1,14 @@
+[package]
+name = "zellij-template-render"
+version = "0.1.0"
+edition = "2021"
+description = "Template-driven terminal layout renderer for Zellij plugins"
+license = "MIT"
+
+[dependencies]
+chrono = "0.4"
+minijinja = "2.21"
+unicode-width = "0.1.8"
+
+[lints.clippy]
+too_many_arguments = "allow"

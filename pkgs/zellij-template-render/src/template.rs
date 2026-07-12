@@ -1,53 +1,17 @@
 //! Evaluates MiniJinja templates into the renderer's internal layout tree.
 
-use ansi_term::ANSIStrings;
-use chrono::{Local, TimeZone};
-use minijinja::value::Kwargs;
-use minijinja::{context, Environment, Error, ErrorKind, State as TemplateState, Value};
-use serde::Serialize;
-use zellij_tile::prelude::*;
-use zellij_tile_utils::style;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 
-use super::{layout_error, ClickAction};
+use chrono::{Local, TimeZone};
+use minijinja::value::{Kwargs, Rest};
+use minijinja::{Environment, Error, ErrorKind, State as TemplateState, Value};
+
+use super::{layout_error, ActionRegistry, ButtonPresentation, ButtonView};
 
 const MARKER: &str = "\u{e000}ZT:";
 const MARKER_END: char = '\u{e001}';
 const ACTION_PREFIX: &str = "\u{e002}ZT:";
-
-/// Built-in template used when plugin configuration provides no override.
-pub(super) const DEFAULT_TEMPLATE: &str = r#"{%- call Flex(direction="row") -%}
-{%- call Flex(shrink=0) -%}{{ session.name }} {% endcall -%}
-{%- call Flex(direction="row", grow=1, shrink=1, overflow="scroll") -%}
-{%- for tab in session.tabs -%}
-{%- call Button(on_click=actions.switch_tab(tab.index), focused=tab.active) -%}{{ tab.name }}{%- endcall -%}
-{%- endfor -%}
-{%- endcall -%}
-{%- call Button(on_click=actions.new_tab()) -%}+{%- endcall -%}
-{%- endcall -%}"#;
-
-#[derive(Serialize)]
-struct TemplateSession<'a> {
-    name: &'a str,
-    tabs: Vec<TemplateTab<'a>>,
-}
-
-#[derive(Serialize)]
-struct TemplateTab<'a> {
-    name: &'a str,
-    index: usize,
-    active: bool,
-}
-
-#[derive(Serialize)]
-struct TemplateTheme {
-    text: String,
-    background: String,
-    active_text: String,
-    active_background: String,
-    muted_text: String,
-    muted_background: String,
-    alert: String,
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum Direction {
@@ -110,26 +74,30 @@ impl Default for FlexSpec {
 }
 
 #[derive(Clone, Debug)]
-pub(super) enum Node {
+pub(super) enum Node<A> {
     Text(String),
     Button {
-        action: ClickAction,
+        action: A,
         focused: bool,
         label: String,
     },
     Flex {
         spec: FlexSpec,
-        children: Vec<Node>,
+        children: Vec<Node<A>>,
     },
 }
 
-pub(super) fn render_tree(
+pub(super) fn render_tree<A, F>(
     template: &str,
-    session_name: Option<&str>,
-    tabs: &[TabInfo],
-    colors: Styling,
-    capabilities: PluginCapabilities,
-) -> Result<Node, Error> {
+    data: Value,
+    actions: &ActionRegistry<A>,
+    present_button: F,
+) -> Result<Node<A>, Error>
+where
+    A: Clone + Send + 'static,
+    F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
+{
+    let arena = Arc::new(Mutex::new(Vec::<A>::new()));
     let mut env = Environment::new();
     env.add_filter("format", format_time);
     env.add_filter("bold", bold);
@@ -138,98 +106,75 @@ pub(super) fn render_tree(
     env.add_filter("bg", background);
     env.add_function("Flex", flex_marker);
 
-    let tab_infos = tabs.to_vec();
+    let action_values = actions
+        .decoders
+        .iter()
+        .map(|(name, decode)| {
+            let arena = Arc::clone(&arena);
+            let decode = Arc::clone(decode);
+            let function = Value::from_function(move |args: Rest<Value>| {
+                let action = decode(&args)?;
+                let mut actions = arena
+                    .lock()
+                    .map_err(|_| layout_error("action registry lock poisoned"))?;
+                let id = actions.len();
+                actions.push(action);
+                Ok(format!("{ACTION_PREFIX}{id}"))
+            });
+            (name.clone(), function)
+        })
+        .collect::<BTreeMap<_, _>>();
+    env.add_global("actions", Value::from_iter(action_values));
+
+    let button_arena = Arc::clone(&arena);
     env.add_function(
         "Button",
         move |state: &TemplateState<'_, '_>, kwargs: Kwargs| {
-            button_marker(state, kwargs, &tab_infos, colors, capabilities)
+            button_marker(state, kwargs, &button_arena, &present_button)
         },
     );
 
-    let actions = context! {
-        switch_tab => Value::from_function(action_switch_tab),
-        new_tab => Value::from_function(action_new_tab),
-    };
-    let model = TemplateSession {
-        name: session_name.unwrap_or_default(),
-        tabs: tabs
-            .iter()
-            .map(|tab| TemplateTab {
-                name: &tab.name,
-                index: tab.position + 1,
-                active: tab.active,
-            })
-            .collect(),
-    };
-    let theme = TemplateTheme {
-        text: color_token(colors.text_unselected.base),
-        background: color_token(colors.text_unselected.background),
-        active_text: color_token(colors.ribbon_selected.base),
-        active_background: color_token(colors.ribbon_selected.background),
-        muted_text: color_token(colors.ribbon_unselected.base),
-        muted_background: color_token(colors.ribbon_unselected.background),
-        alert: color_token(colors.ribbon_unselected.emphasis_3),
-    };
-    let rendered = env.render_str(
-        template,
-        context! {
-            session => model,
-            system => context! { time => Local::now().timestamp() },
-            actions => actions,
-            context => context! { theme => theme },
-        },
-    )?;
+    let rendered = env.render_str(template, data)?;
     Ok(Node::Flex {
         spec: FlexSpec::default(),
-        children: parse_nodes(&rendered)?,
+        children: parse_nodes(&rendered, &arena)?,
     })
 }
 
-fn action_switch_tab(index: usize) -> String {
-    format!("{ACTION_PREFIX}switch:{index}")
+fn decode_action<A: Clone>(value: &Value, arena: &Mutex<Vec<A>>) -> Result<(usize, A), Error> {
+    let value = value.as_str().ok_or_else(invalid_button_action)?;
+    let id = value
+        .strip_prefix(ACTION_PREFIX)
+        .and_then(|value| value.parse::<usize>().ok())
+        .ok_or_else(invalid_button_action)?;
+    let action = arena
+        .lock()
+        .map_err(|_| layout_error("action registry lock poisoned"))?
+        .get(id)
+        .cloned()
+        .ok_or_else(invalid_button_action)?;
+    Ok((id, action))
 }
 
-fn action_new_tab() -> String {
-    format!("{ACTION_PREFIX}new")
-}
-
-fn decode_action(value: &Value) -> Result<ClickAction, Error> {
-    let value = value.as_str().ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidOperation,
-            "Button on_click must come from actions",
-        )
-    })?;
-    let encoded = value.strip_prefix(ACTION_PREFIX).ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidOperation,
-            "Button on_click must come from actions",
-        )
-    })?;
-    if encoded == "new" {
-        return Ok(ClickAction::NewTab);
-    }
-    if let Some(index) = encoded.strip_prefix("switch:") {
-        let index = index
-            .parse()
-            .map_err(|_| Error::new(ErrorKind::InvalidOperation, "invalid switch_tab action"))?;
-        return Ok(ClickAction::SwitchTab(index));
-    }
-    Err(Error::new(
+fn invalid_button_action() -> Error {
+    Error::new(
         ErrorKind::InvalidOperation,
-        "unknown click action",
-    ))
+        "Button on_click must come from actions",
+    )
 }
 
-fn button_marker(
+fn button_marker<A, F>(
     state: &TemplateState<'_, '_>,
     kwargs: Kwargs,
-    tabs: &[TabInfo],
-    colors: Styling,
-    capabilities: PluginCapabilities,
-) -> Result<String, Error> {
-    let action = decode_action(&kwargs.get::<Value>("on_click")?)?;
-    let explicit_focused = kwargs.get::<Option<bool>>("focused")?;
+    arena: &Mutex<Vec<A>>,
+    present_button: &F,
+) -> Result<String, Error>
+where
+    A: Clone,
+    F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error>,
+{
+    let (action_id, action) = decode_action(&kwargs.get::<Value>("on_click")?, arena)?;
+    let focused = kwargs.get::<Option<bool>>("focused")?;
     let label = kwargs.get::<Option<String>>("label")?;
     let caller = kwargs.get::<Option<Value>>("caller")?;
     kwargs.assert_all_used()?;
@@ -249,105 +194,17 @@ fn button_marker(
             "Button label cannot contain layout helpers",
         ));
     }
-    let focused = explicit_focused.unwrap_or_else(|| match action {
-        ClickAction::SwitchTab(index) => tabs
-            .iter()
-            .any(|tab| tab.active && tab.position + 1 == index),
-        ClickAction::NewTab => false,
-    });
-    let styled = style_button(&label, &action, focused, tabs, colors, capabilities)?;
+    let presentation = present_button(ButtonView {
+        label: &label,
+        action: &action,
+        focused,
+    })?;
     Ok(format!(
-        "{MARKER}B|{}|{}{}{}{MARKER}/B{MARKER_END}",
-        encode_action(&action),
-        usize::from(focused),
+        "{MARKER}B|{action_id}|{}{}{label}{MARKER}/B{MARKER_END}",
+        usize::from(presentation.focused),
         MARKER_END,
-        styled
+        label = presentation.label,
     ))
-}
-
-fn style_button(
-    label: &str,
-    action: &ClickAction,
-    focused: bool,
-    tabs: &[TabInfo],
-    palette: Styling,
-    capabilities: PluginCapabilities,
-) -> Result<String, Error> {
-    let separator = if capabilities.arrow_fonts { "" } else { "" };
-    let label = match action {
-        ClickAction::SwitchTab(index) => {
-            let tab = tabs
-                .iter()
-                .find(|tab| tab.position + 1 == *index)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidOperation,
-                        "switch_tab index does not exist",
-                    )
-                })?;
-            let mut label = label.to_string();
-            if tab.is_fullscreen_active {
-                label.push_str(" (FULLSCREEN)");
-            } else if tab.is_sync_panes_active {
-                label.push_str(" (SYNC)");
-            }
-            if tab.has_bell_notification || tab.is_flashing_bell {
-                label.push_str(" [!]");
-            }
-            label
-        },
-        ClickAction::NewTab => label.to_string(),
-    };
-    let alternate = match action {
-        ClickAction::SwitchTab(index) => index % 2 == 0 && capabilities.arrow_fonts,
-        ClickAction::NewTab => tabs.len() % 2 == 1 && capabilities.arrow_fonts,
-    };
-    let background = if focused {
-        palette.ribbon_selected.background
-    } else if alternate {
-        palette.ribbon_unselected.emphasis_1
-    } else {
-        palette.ribbon_unselected.background
-    };
-    let foreground = match action {
-        ClickAction::SwitchTab(index) => {
-            let tab = tabs
-                .iter()
-                .find(|tab| tab.position + 1 == *index)
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidOperation,
-                        "switch_tab index does not exist",
-                    )
-                })?;
-            if tab.is_flashing_bell || tab.has_bell_notification {
-                if focused {
-                    palette.ribbon_selected.emphasis_3
-                } else {
-                    palette.ribbon_unselected.emphasis_3
-                }
-            } else if focused {
-                palette.ribbon_selected.base
-            } else {
-                palette.ribbon_unselected.base
-            }
-        },
-        ClickAction::NewTab => palette.ribbon_unselected.base,
-    };
-    let fill = palette.text_unselected.background;
-    let left = style!(fill, background).paint(separator);
-    let text = style!(foreground, background)
-        .bold()
-        .paint(format!(" {} ", label));
-    let right = style!(background, fill).paint(separator);
-    Ok(ANSIStrings(&[left, text, right]).to_string())
-}
-
-fn encode_action(action: &ClickAction) -> String {
-    match action {
-        ClickAction::SwitchTab(index) => format!("switch:{index}"),
-        ClickAction::NewTab => "new".into(),
-    }
 }
 
 fn flex_marker(state: &TemplateState<'_, '_>, kwargs: Kwargs) -> Result<String, Error> {
@@ -453,13 +310,6 @@ fn background(value: String, color: String) -> Result<String, Error> {
     ))
 }
 
-fn color_token(color: PaletteColor) -> String {
-    match color {
-        PaletteColor::Rgb((r, g, b)) => format!("rgb:{r},{g},{b}"),
-        PaletteColor::EightBit(index) => format!("index:{index}"),
-    }
-}
-
 fn color_escape(token: &str, background: bool) -> Result<String, Error> {
     let channel = if background { 48 } else { 38 };
     if let Some(rgb) = token.strip_prefix("rgb:") {
@@ -476,17 +326,17 @@ fn color_escape(token: &str, background: bool) -> Result<String, Error> {
             return Ok(format!("\u{1b}[{channel};5;{index}m"));
         }
     }
-    Err(layout_error("color must come from context.theme"))
+    Err(layout_error("color must be rgb:R,G,B or index:N"))
 }
 
 #[derive(Debug)]
-enum ParseOpen {
-    Root(Vec<Node>),
-    Flex(FlexSpec, Vec<Node>),
-    Button(ClickAction, bool, String),
+enum ParseOpen<A> {
+    Root(Vec<Node<A>>),
+    Flex(FlexSpec, Vec<Node<A>>),
+    Button(A, bool, String),
 }
 
-fn parse_nodes(input: &str) -> Result<Vec<Node>, Error> {
+fn parse_nodes<A: Clone>(input: &str, arena: &Mutex<Vec<A>>) -> Result<Vec<Node<A>>, Error> {
     let mut stack = vec![ParseOpen::Root(Vec::new())];
     let mut rest = input;
     while let Some(at) = rest.find(MARKER) {
@@ -515,7 +365,10 @@ fn parse_nodes(input: &str) -> Result<Vec<Node>, Error> {
             stack.push(ParseOpen::Flex(parse_flex_spec(spec)?, Vec::new()));
         } else if let Some(button) = marker.strip_prefix("B|") {
             let mut fields = button.split('|');
-            let action = parse_action(fields.next().unwrap_or_default())?;
+            let action_id = fields
+                .next()
+                .and_then(|value| value.parse::<usize>().ok())
+                .ok_or_else(|| layout_error("invalid Button action marker"))?;
             let focused = match fields.next() {
                 Some("0") => false,
                 Some("1") => true,
@@ -524,6 +377,12 @@ fn parse_nodes(input: &str) -> Result<Vec<Node>, Error> {
             if fields.next().is_some() {
                 return Err(layout_error("invalid Button marker"));
             }
+            let action = arena
+                .lock()
+                .map_err(|_| layout_error("action registry lock poisoned"))?
+                .get(action_id)
+                .cloned()
+                .ok_or_else(|| layout_error("invalid Button action marker"))?;
             stack.push(ParseOpen::Button(action, focused, String::new()));
         } else {
             return Err(layout_error("unknown internal marker"));
@@ -539,7 +398,7 @@ fn parse_nodes(input: &str) -> Result<Vec<Node>, Error> {
     }
 }
 
-fn push_text(stack: &mut [ParseOpen], text: &str) -> Result<(), Error> {
+fn push_text<A>(stack: &mut [ParseOpen<A>], text: &str) -> Result<(), Error> {
     if text.is_empty() {
         return Ok(());
     }
@@ -555,7 +414,7 @@ fn push_text(stack: &mut [ParseOpen], text: &str) -> Result<(), Error> {
     Ok(())
 }
 
-fn push_node(stack: &mut [ParseOpen], node: Node) -> Result<(), Error> {
+fn push_node<A>(stack: &mut [ParseOpen<A>], node: Node<A>) -> Result<(), Error> {
     match stack
         .last_mut()
         .ok_or_else(|| layout_error("node outside layout root"))?
@@ -566,17 +425,6 @@ fn push_node(stack: &mut [ParseOpen], node: Node) -> Result<(), Error> {
         },
     }
     Ok(())
-}
-
-fn parse_action(value: &str) -> Result<ClickAction, Error> {
-    if value == "new" {
-        return Ok(ClickAction::NewTab);
-    }
-    value
-        .strip_prefix("switch:")
-        .and_then(|v| v.parse().ok())
-        .map(ClickAction::SwitchTab)
-        .ok_or_else(|| layout_error("invalid Button action marker"))
 }
 
 fn parse_flex_spec(value: &str) -> Result<FlexSpec, Error> {
@@ -631,14 +479,20 @@ fn parse_flex_spec(value: &str) -> Result<FlexSpec, Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::render::layout::layout;
+    use crate::layout::layout;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum TestAction {
+        New,
+    }
 
     #[test]
     fn custom_template_parses_nested_flex_and_button() {
+        let arena = Mutex::new(vec![TestAction::New]);
         let rendered = format!(
-            "{MARKER}F|column|1|1|auto|center|stretch|normal{MARKER_END}{MARKER}B|new|1{MARKER_END}+{MARKER}/B{MARKER_END}{MARKER}/F{MARKER_END}"
+            "{MARKER}F|column|1|1|auto|center|stretch|normal{MARKER_END}{MARKER}B|0|1{MARKER_END}+{MARKER}/B{MARKER_END}{MARKER}/F{MARKER_END}"
         );
-        let nodes = parse_nodes(&rendered).unwrap();
+        let nodes = parse_nodes(&rendered, &arena).unwrap();
         let frame = layout(
             &Node::Flex {
                 spec: FlexSpec::default(),
@@ -649,11 +503,11 @@ mod tests {
         )
         .unwrap()
         .into_frame();
-        assert_eq!(frame.hitboxes[0][0], Some(ClickAction::NewTab));
+        assert_eq!(frame.hitboxes[0][0], Some(TestAction::New));
     }
 
     #[test]
-    fn theme_filters_accept_only_theme_tokens() {
+    fn theme_filters_validate_color_shape() {
         assert!(foreground("x".into(), "rgb:1,2,3".into())
             .unwrap()
             .contains("\u{1b}[38;2;1;2;3m"));

@@ -1,0 +1,24 @@
+---
+$schema: "file://../../.moon/cache/schemas/project.json"
+
+language: rust
+layer: library
+
+tasks:
+  check:
+    script: |
+      set -euo pipefail
+      rustup target add wasm32-wasip1 >/dev/null 2>&1 || true
+      CARGO_TARGET_DIR="$PWD/target" cargo check --target wasm32-wasip1
+    inputs:
+      - "Cargo.toml"
+      - "src/**/*.rs"
+
+  test:
+    script: |
+      set -euo pipefail
+      host_target="$(rustc -vV | awk '/^host:/ {print $2}')"
+      CARGO_TARGET_DIR="$PWD/target" cargo test --target "$host_target"
+    inputs:
+      - "Cargo.toml"
+      - "src/**/*.rs"

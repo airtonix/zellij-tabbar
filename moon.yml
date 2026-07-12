@@ -14,11 +14,13 @@ tasks:
   check:
     deps:
       - "zellij-tabbar:check"
+      - "zellij-template-render:check"
     command: "noop"
 
   test:
     deps:
       - "zellij-tabbar:test"
+      - "zellij-template-render:test"
     command: "noop"
 
   e2e:

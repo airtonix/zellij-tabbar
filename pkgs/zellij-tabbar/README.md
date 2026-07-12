@@ -252,7 +252,7 @@ Theme values:
 - `context.theme.muted_background`
 - `context.theme.alert`
 
-`fg` and `bg` only accept colours supplied by `context.theme`.
+`fg` and `bg` accept renderer colour tokens shaped as `rgb:R,G,B` or `index:N`. `context.theme` supplies tokens matching the active Zellij theme.
 
 ## Strict template rules
 
@@ -267,6 +267,8 @@ The renderer rejects:
 - malformed ANSI escape sequences
 
 Failures appear directly in the tab bar as `template error: ...`.
+
+Template parsing, Flex layout, ANSI clipping, and typed hitboxes come from the shared [`zellij-template-render`](../zellij-template-render) crate. Tab data, actions, and button styling remain owned by this plugin.
 
 ## Migrating old templates
 

@@ -4,20 +4,29 @@ use minijinja::Error;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::template::{Align, Basis, Direction, FlexSpec, Justify, Node, Overflow};
-use super::{layout_error, ClickAction, RenderedFrame};
+use super::{layout_error, Frame};
 
-#[derive(Clone, Debug, Default)]
-pub(super) struct Canvas {
-    cells: Vec<Vec<Cell>>,
+#[derive(Clone, Debug)]
+pub(super) struct Canvas<A> {
+    cells: Vec<Vec<Cell<A>>>,
 }
 
-#[derive(Clone, Debug, Default)]
-struct Cell {
+#[derive(Clone, Debug)]
+struct Cell<A> {
     text: String,
-    action: Option<ClickAction>,
+    action: Option<A>,
 }
 
-impl Canvas {
+impl<A> Default for Cell<A> {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            action: None,
+        }
+    }
+}
+
+impl<A: Clone> Canvas<A> {
     fn new(width: usize, height: usize) -> Self {
         Self {
             cells: vec![vec![Cell::default(); width]; height],
@@ -32,7 +41,14 @@ impl Canvas {
         self.cells.len()
     }
 
-    fn blit(&mut self, child: &Canvas, x: usize, y: usize, clip_width: usize, clip_height: usize) {
+    fn blit(
+        &mut self,
+        child: &Canvas<A>,
+        x: usize,
+        y: usize,
+        clip_width: usize,
+        clip_height: usize,
+    ) {
         for (child_y, row) in child.cells.iter().enumerate().take(clip_height) {
             let Some(target_row) = self.cells.get_mut(y + child_y) else {
                 break;
@@ -48,7 +64,7 @@ impl Canvas {
         }
     }
 
-    pub(super) fn into_frame(self) -> RenderedFrame {
+    pub(super) fn into_frame(self) -> Frame<A> {
         let mut lines = Vec::with_capacity(self.height());
         let mut hitboxes = Vec::with_capacity(self.height());
         for row in self.cells {
@@ -61,10 +77,14 @@ impl Canvas {
             lines.push(line.trim_end_matches(' ').to_string());
             hitboxes.push(actions);
         }
-        RenderedFrame { lines, hitboxes }
+        Frame { lines, hitboxes }
     }
 }
-pub(super) fn layout(node: &Node, width: usize, height: usize) -> Result<Canvas, Error> {
+pub(super) fn layout<A: Clone>(
+    node: &Node<A>,
+    width: usize,
+    height: usize,
+) -> Result<Canvas<A>, Error> {
     match node {
         Node::Text(text) => text_canvas(text, width, height, None),
         Node::Button {
@@ -76,7 +96,7 @@ pub(super) fn layout(node: &Node, width: usize, height: usize) -> Result<Canvas,
     }
 }
 
-fn natural_size(node: &Node) -> Result<(usize, usize), Error> {
+fn natural_size<A>(node: &Node<A>) -> Result<(usize, usize), Error> {
     match node {
         Node::Text(text) | Node::Button { label: text, .. } => {
             let lines = split_text_lines(text)?;
@@ -108,12 +128,12 @@ fn natural_size(node: &Node) -> Result<(usize, usize), Error> {
     }
 }
 
-fn layout_flex(
+fn layout_flex<A: Clone>(
     spec: &FlexSpec,
-    children: &[Node],
+    children: &[Node<A>],
     width: usize,
     height: usize,
-) -> Result<Canvas, Error> {
+) -> Result<Canvas<A>, Error> {
     let main_available = if spec.direction == Direction::Row {
         width
     } else {
@@ -240,7 +260,7 @@ fn layout_flex(
     Ok(canvas)
 }
 
-fn distribute(sizes: &mut [usize], children: &[Node], mut amount: usize, grow: bool) {
+fn distribute<A>(sizes: &mut [usize], children: &[Node<A>], mut amount: usize, grow: bool) {
     while amount > 0 {
         let mut changed = false;
         for (size, child) in sizes.iter_mut().zip(children) {
@@ -276,7 +296,7 @@ fn distribute(sizes: &mut [usize], children: &[Node], mut amount: usize, grow: b
     }
 }
 
-fn focused_offset(children: &[Node], sizes: &[usize], viewport: usize) -> usize {
+fn focused_offset<A>(children: &[Node<A>], sizes: &[usize], viewport: usize) -> usize {
     let mut start = 0;
     for (child, size) in children.iter().zip(sizes) {
         if contains_focus(child) {
@@ -287,7 +307,7 @@ fn focused_offset(children: &[Node], sizes: &[usize], viewport: usize) -> usize 
     0
 }
 
-fn contains_focus(node: &Node) -> bool {
+fn contains_focus<A>(node: &Node<A>) -> bool {
     match node {
         Node::Button { focused, .. } => *focused,
         Node::Flex { children, .. } => children.iter().any(contains_focus),
@@ -309,7 +329,13 @@ fn justify(justify: Justify, free: usize, count: usize) -> (usize, usize, bool) 
     }
 }
 
-fn crop(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Canvas {
+fn crop<A: Clone>(
+    canvas: &Canvas<A>,
+    x: usize,
+    y: usize,
+    width: usize,
+    height: usize,
+) -> Canvas<A> {
     let mut result = Canvas::new(width, height);
     for row in 0..height {
         for col in 0..width {
@@ -321,12 +347,12 @@ fn crop(canvas: &Canvas, x: usize, y: usize, width: usize, height: usize) -> Can
     result
 }
 
-fn text_canvas(
+fn text_canvas<A: Clone>(
     text: &str,
     width: usize,
     height: usize,
-    action: Option<ClickAction>,
-) -> Result<Canvas, Error> {
+    action: Option<A>,
+) -> Result<Canvas<A>, Error> {
     let lines = split_text_lines(text)?;
     let mut canvas = Canvas::new(width, height);
     for (y, line) in lines.iter().take(height).enumerate() {
@@ -440,7 +466,13 @@ pub(super) fn consume_ansi(
 mod tests {
     use super::*;
 
-    fn plain_button(label: &str, action: ClickAction, focused: bool) -> Node {
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    enum TestAction {
+        Switch(usize),
+        New,
+    }
+
+    fn plain_button(label: &str, action: TestAction, focused: bool) -> Node<TestAction> {
         Node::Button {
             action,
             focused,
@@ -450,7 +482,7 @@ mod tests {
 
     #[test]
     fn flex_grow_allocates_remaining_cells() {
-        let node = Node::Flex {
+        let node: Node<TestAction> = Node::Flex {
             spec: FlexSpec::default(),
             children: vec![
                 Node::Text("a".into()),
@@ -477,8 +509,8 @@ mod tests {
                 ..FlexSpec::default()
             },
             children: vec![
-                plain_button("one", ClickAction::SwitchTab(1), false),
-                plain_button("two", ClickAction::SwitchTab(2), true),
+                plain_button("one", TestAction::Switch(1), false),
+                plain_button("two", TestAction::Switch(2), true),
             ],
         };
         let frame = layout(&node, 3, 1).unwrap().into_frame();
@@ -493,18 +525,18 @@ mod tests {
                 ..FlexSpec::default()
             },
             children: vec![
-                plain_button("a", ClickAction::SwitchTab(1), false),
-                plain_button("+", ClickAction::NewTab, false),
+                plain_button("a", TestAction::Switch(1), false),
+                plain_button("+", TestAction::New, false),
             ],
         };
         let frame = layout(&node, 2, 2).unwrap().into_frame();
-        assert_eq!(frame.hitboxes[0][0], Some(ClickAction::SwitchTab(1)));
-        assert_eq!(frame.hitboxes[1][0], Some(ClickAction::NewTab));
+        assert_eq!(frame.hitboxes[0][0], Some(TestAction::Switch(1)));
+        assert_eq!(frame.hitboxes[1][0], Some(TestAction::New));
     }
 
     #[test]
     fn clipped_ansi_text_keeps_each_visible_cell_styled() {
-        let canvas = text_canvas("\u{1b}[31mabc\u{1b}[0m", 3, 1, None).unwrap();
+        let canvas: Canvas<TestAction> = text_canvas("\u{1b}[31mabc\u{1b}[0m", 3, 1, None).unwrap();
         let clipped = crop(&canvas, 1, 0, 1, 1).into_frame();
         assert!(clipped.lines[0].starts_with("\u{1b}[31m"));
         assert!(clipped.lines[0].ends_with("\u{1b}[0m"));
