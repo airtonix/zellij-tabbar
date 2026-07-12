@@ -15,6 +15,7 @@ struct State {
     template: Option<String>,
     frame: RenderedFrame,
     tabbar_renderer: TabBarRenderer,
+    timer_armed: bool,
 }
 
 register_plugin!(State);
@@ -38,6 +39,7 @@ impl ZellijPlugin for State {
             EventType::TabUpdate,
             EventType::ModeUpdate,
             EventType::Mouse,
+            EventType::Timer,
         ]);
     }
 
@@ -52,6 +54,10 @@ impl ZellijPlugin for State {
                 self.tabs = tabs;
                 // Always repaint: tab closure can produce an empty or otherwise equal-looking update.
                 true
+            },
+            Event::Timer(_) => {
+                self.timer_armed = false;
+                !self.tabs.is_empty()
             },
             Event::Mouse(Mouse::LeftClick(row, col)) => {
                 if let Some(action) = usize::try_from(row)
@@ -90,6 +96,12 @@ impl ZellijPlugin for State {
                 Ok(frame) => frame,
                 Err(error) => self.tabbar_renderer.error_frame(&error, rows, cols),
             };
+        }
+        if !self.timer_armed {
+            if let Some(delay) = self.frame.refresh_after {
+                set_timeout(delay.as_secs_f64());
+                self.timer_armed = true;
+            }
         }
         let output = (0..rows)
             .map(|row| {

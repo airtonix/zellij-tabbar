@@ -323,6 +323,9 @@ mod tests {
         assert!(frame.hitboxes[0]
             .iter()
             .any(|action| action == &Some(ClickAction::NewTab)));
+        assert!(frame.refresh_after.is_some_and(|delay| {
+            !delay.is_zero() && delay <= std::time::Duration::from_secs(60)
+        }));
     }
 
     #[test]

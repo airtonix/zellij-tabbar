@@ -158,27 +158,74 @@ Invalid templates render a visible `template error:` message instead of silently
 
 `tab.index` is one-based.
 
-### Time
+## Theme
+
+The top-level `theme` object exposes colours derived from the active Zellij theme. Use these values with the `fg` and `bg` filters; they are colour tokens shaped as `rgb:R,G,B` or `index:N`.
+
+| Property | Use |
+|---|---|
+| `theme.text` | Default foreground |
+| `theme.background` | Default background |
+| `theme.active_text` | Foreground for the active or focused item |
+| `theme.active_background` | Background for the active or focused item |
+| `theme.muted_text` | Foreground for inactive or secondary content |
+| `theme.muted_background` | Background for inactive or secondary content |
+| `theme.alert` | Warning or attention colour |
+
+Apply foreground and background colours by piping text through filters:
 
 ```jinja
-{{ system.time | format("HH:MM") }}
+{{ session.name | fg(theme.text) | bg(theme.background) }}
+{{ tab.name | fg(theme.active_text) | bg(theme.active_background) }}
+{{ "!" | fg(theme.alert) }}
 ```
 
-Supported format tokens:
+Choose colours by meaning rather than by expected RGB value. Zellij users can change themes, and the same template follows their active palette automatically. `theme` is top-level; `context.theme` is unsupported.
 
-| Token | Meaning |
-|---|---|
-| `YYYY` | Four-digit year |
-| `YY` | Two-digit year |
-| `HH` | Hour |
-| `MM` | Minute |
-| `SS` | Second |
+## Components
 
-## Buttons
+Templates can emit plain text and use the following renderer primitives. `Flex` and `Button` are MiniJinja call blocks. `Clock` is a function. Text styling uses filters.
 
-`Button` owns styling and creates a left-click hitbox.
+### Flex
 
-Switch tabs:
+`Flex` arranges its body in a row or column. Nest calls to build the complete tab bar.
+
+| Prop | Type / values | Default | Guide |
+|---|---|---|---|
+| `direction` | `row`, `column` | `row` | Select main layout axis. |
+| `grow` | Non-negative integer | `0` | Share unused cells with growing siblings. |
+| `shrink` | Non-negative integer | `1` | Share overflow reduction with shrinking siblings. Use `0` for fixed controls. |
+| `basis` | `auto` or non-negative cell count | `auto` | Set initial main-axis size before grow or shrink. |
+| `gap` | Non-negative cell count | `0` | Insert cells between direct children. |
+| `justify` | `start`, `center`, `end`, `space-between`, `space-around` | `start` | Position children on main axis when free cells remain. |
+| `align` | `start`, `center`, `end`, `stretch` | `start` | Position children on cross axis. |
+| `overflow` | `normal`, `scroll` | `normal` | Clip overflow, or follow focused descendant inside a scrolling viewport. |
+
+Basic row with fixed edges and a flexible centre:
+
+```jinja
+{% call Flex(direction="row", gap=1) %}
+  {% call Flex(shrink=0) %}{{ session.name }}{% endcall %}
+  {% call Flex(grow=1, overflow="scroll") %}
+    ...tab buttons...
+  {% endcall %}
+  {% call Flex(shrink=0) %}right edge{% endcall %}
+{% endcall %}
+```
+
+Use `grow=1` on the region that should consume remaining width. Use `shrink=0` on controls that must remain visible. For tabs, set `overflow="scroll"`; the viewport follows the descendant `Button` whose resolved focus state is true. There is no separate mouse-controlled scroll position.
+
+### Button
+
+`Button` renders host-styled text and creates a left-click hitbox over its visible cells.
+
+| Prop | Type / values | Default | Guide |
+|---|---|---|---|
+| `on_click` | Value returned by `actions.*` | Required | Select action executed by left click. Constructed strings are rejected. |
+| `focused` | Boolean | Host policy | Marks item as focused and lets scrollable ancestors keep it visible. |
+| `label` | String | Call body | Supply label directly instead of using a call body. |
+
+Tab button using a call body:
 
 ```jinja
 {% call Button(
@@ -189,72 +236,66 @@ Switch tabs:
 {% endcall %}
 ```
 
-Create a tab:
+Button using the `label` prop:
 
 ```jinja
-{% call Button(on_click=actions.new_tab()) %}
-  +
-{% endcall %}
+{{ Button(on_click=actions.new_tab(), label="+") }}
 ```
 
-Only actions supplied through `actions` are accepted. Constructed action strings are rejected.
+Available actions:
 
-Supported mouse interaction is left click. Right click and middle click have no configured button actions.
-
-## Flex layout
-
-`Flex` supports nested row and column layouts:
-
-```jinja
-{% call Flex(
-  direction="row",
-  grow=1,
-  shrink=1,
-  basis="auto",
-  gap=1,
-  justify="start",
-  align="start",
-  overflow="normal"
-) %}
-  ...
-{% endcall %}
-```
-
-| Option | Values | Default |
+| Function | Props | Result |
 |---|---|---|
-| `direction` | `row`, `column` | `row` |
-| `grow` | Non-negative integer ratio | `0` |
-| `shrink` | Non-negative integer ratio | `1` |
-| `basis` | `auto` or terminal-cell integer | `auto` |
-| `gap` | Non-negative terminal-cell integer between children | `0` |
-| `justify` | `start`, `center`, `end`, `space-between`, `space-around` | `start` |
-| `align` | `start`, `center`, `end`, `stretch` | `start` |
-| `overflow` | `normal`, `scroll` | `normal` |
+| `actions.switch_tab(index)` | `index`: one-based tab index | Switch to the selected tab. |
+| `actions.new_tab()` | None | Create a tab. |
 
-Use `overflow="scroll"` around tab buttons. The viewport automatically follows the button marked `focused=true`. It does not maintain a separate mouse-controlled scroll position.
+Button labels may contain styled text, but cannot contain `Flex`, `Button`, or other layout helpers. Only left click is mapped; right and middle click have no button action.
 
-## Styling text
+### Clock
 
-Available filters:
+`Clock` renders local time and asks the host to repaint at the next relevant boundary.
+
+| Prop | Type / values | Default | Guide |
+|---|---|---|---|
+| `format` | String | Required | Time pattern using friendly tokens or Chrono `strftime` directives. |
 
 ```jinja
-{{ "bold" | bold }}
-{{ "dim" | dim }}
-{{ "text" | fg(theme.text) }}
-{{ "active" | fg(theme.active_text) | bg(theme.active_background) }}
+{{ Clock(format="HH:MM") }}
+{{ Clock(format="HH:MM:SS") | dim }}
+{{ Clock(format="%Y-%m-%d %H:%M") }}
 ```
 
-Theme values:
+Formats containing `SS` or `%S` repaint at the next second boundary. Other formats repaint at the next minute boundary. `system.time | format("HH:MM")` formats the current frame timestamp without scheduling another repaint.
 
-- `theme.text`
-- `theme.background`
-- `theme.active_text`
-- `theme.active_background`
-- `theme.muted_text`
-- `theme.muted_background`
-- `theme.alert`
+Friendly format tokens:
 
-`fg` and `bg` accept renderer colour tokens shaped as `rgb:R,G,B` or `index:N`. `theme` supplies tokens matching the active Zellij theme.
+| Token | Meaning |
+|---|---|
+| `YYYY` | Four-digit year |
+| `YY` | Two-digit year |
+| `HH` | Hour, 24-hour clock |
+| `MM` | Minute |
+| `SS` | Second |
+
+### Text filters
+
+Filters transform text before layout. They can be chained.
+
+| Filter | Props | Result |
+|---|---|---|
+| `bold` | None | Bold text, reset after value. |
+| `dim` | None | Dim text, reset after value. |
+| `fg(color)` | `color`: `rgb:R,G,B` or `index:N` | Set foreground, then reset it. |
+| `bg(color)` | `color`: `rgb:R,G,B` or `index:N` | Set background, then reset it. |
+| `format(pattern)` | `pattern`: time format string | Format a Unix timestamp in local time. |
+
+```jinja
+{{ "active" | bold | fg(theme.active_text) | bg(theme.active_background) }}
+{{ "inactive" | dim | fg(theme.muted_text) }}
+{{ system.time | format("HH:MM") }}
+```
+
+ANSI styling is measured and clipped by visible terminal cells, so escape sequences do not consume layout width.
 
 ## Strict template rules
 
