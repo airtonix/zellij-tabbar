@@ -2,4 +2,5 @@
 {%- for tab in session.tabs -%}
 {%- call Button(on_click=actions.switch_tab(tab.index), focused=tab.active) -%}{{ tab.name }}{%- endcall -%}
 {%- endfor -%}
+{%- call OnOverflow() -%} ⬇️  {%- endcall -%}
 {%- endcall -%}
