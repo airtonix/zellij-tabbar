@@ -97,6 +97,7 @@ pub(super) fn layout<A: Clone>(
             label,
         } => text_canvas(label, width, height, Some(action.clone())),
         Node::Flex { spec, children } => layout_flex(spec, children, width, height),
+        Node::OnOverflow { .. } => Err(layout_error("OnOverflow must be a direct child of Flex")),
     }
 }
 
@@ -138,10 +139,135 @@ fn natural_size<A>(node: &Node<A>) -> Result<(usize, usize), Error> {
                 ),
             })
         },
+        Node::OnOverflow { children } => {
+            let sizes: Vec<_> = children
+                .iter()
+                .map(natural_size)
+                .collect::<Result<_, _>>()?;
+            Ok((
+                sizes.iter().map(|size| size.0).sum(),
+                sizes.iter().map(|size| size.1).max().unwrap_or(1),
+            ))
+        },
     }
 }
 
 fn layout_flex<A: Clone>(
+    spec: &FlexSpec,
+    children: &[Node<A>],
+    width: usize,
+    height: usize,
+) -> Result<Canvas<A>, Error> {
+    let mut indicator = None;
+    let mut normal = Vec::with_capacity(children.len());
+    for child in children {
+        match child {
+            Node::OnOverflow { children } if indicator.is_none() => indicator = Some(children),
+            Node::OnOverflow { .. } => {
+                return Err(layout_error("Flex accepts at most one OnOverflow child"))
+            },
+            _ => normal.push(child.clone()),
+        }
+    }
+    let Some(indicator_children) = indicator else {
+        return layout_flex_children(spec, children, width, height);
+    };
+    if spec.overflow != Overflow::Scroll {
+        return Err(layout_error(
+            "OnOverflow parent Flex must use overflow=\"scroll\"",
+        ));
+    }
+    let main_available = if spec.direction == Direction::Row {
+        width
+    } else {
+        height
+    };
+    let natural_main = normal
+        .iter()
+        .map(|child| {
+            let natural = natural_size(child)?;
+            Ok(match child {
+                Node::Flex {
+                    spec: child_spec, ..
+                } => match child_spec.basis {
+                    Basis::Auto => {
+                        if spec.direction == Direction::Row {
+                            natural.0
+                        } else {
+                            natural.1
+                        }
+                    },
+                    Basis::Cells(value) => value,
+                },
+                _ => {
+                    if spec.direction == Direction::Row {
+                        natural.0
+                    } else {
+                        natural.1
+                    }
+                },
+            })
+        })
+        .collect::<Result<Vec<usize>, Error>>()?
+        .into_iter()
+        .sum::<usize>()
+        .saturating_add(spec.gap.saturating_mul(normal.len().saturating_sub(1)));
+    if natural_main <= main_available {
+        return layout_flex_children(spec, &normal, width, height);
+    }
+
+    let indicator_natural = natural_size(&Node::OnOverflow {
+        children: indicator_children.clone(),
+    })?;
+    let indicator_main = if spec.direction == Direction::Row {
+        indicator_natural.0
+    } else {
+        indicator_natural.1
+    }
+    .min(main_available);
+    let indicator_gap = spec.gap.min(main_available.saturating_sub(indicator_main));
+    let content_main = main_available.saturating_sub(indicator_main + indicator_gap);
+    let (content_width, content_height) = if spec.direction == Direction::Row {
+        (content_main, height)
+    } else {
+        (width, content_main)
+    };
+    let content = layout_flex_children(spec, &normal, content_width, content_height)?;
+    let indicator_spec = FlexSpec::default();
+    let (indicator_width, indicator_height) = if spec.direction == Direction::Row {
+        (indicator_main, height)
+    } else {
+        (width, indicator_main)
+    };
+    let indicator_canvas = layout_flex_children(
+        &indicator_spec,
+        indicator_children,
+        indicator_width,
+        indicator_height,
+    )?;
+    let mut canvas = Canvas::new(width, height);
+    canvas.blit(&content, 0, 0, content.width(), content.height());
+    if spec.direction == Direction::Row {
+        canvas.blit(
+            &indicator_canvas,
+            content_main + indicator_gap,
+            0,
+            indicator_width,
+            indicator_height,
+        );
+    } else {
+        canvas.blit(
+            &indicator_canvas,
+            0,
+            content_main + indicator_gap,
+            indicator_width,
+            indicator_height,
+        );
+    }
+    Ok(canvas)
+}
+
+fn layout_flex_children<A: Clone>(
     spec: &FlexSpec,
     children: &[Node<A>],
     width: usize,
@@ -325,7 +451,9 @@ fn focused_offset<A>(children: &[Node<A>], sizes: &[usize], gap: usize, viewport
 fn contains_focus<A>(node: &Node<A>) -> bool {
     match node {
         Node::Button { focused, .. } => *focused,
-        Node::Flex { children, .. } => children.iter().any(contains_focus),
+        Node::Flex { children, .. } | Node::OnOverflow { children } => {
+            children.iter().any(contains_focus)
+        },
         Node::Text(_) => false,
     }
 }
@@ -531,6 +659,42 @@ mod tests {
         };
         let frame = layout(&node, 3, 1).unwrap().into_frame();
         assert_eq!(frame.lines[0], "two");
+    }
+
+    #[test]
+    fn on_overflow_is_hidden_when_content_fits() {
+        let node: Node<TestAction> = Node::Flex {
+            spec: FlexSpec {
+                overflow: Overflow::Scroll,
+                ..FlexSpec::default()
+            },
+            children: vec![
+                Node::Text("tabs".into()),
+                Node::OnOverflow {
+                    children: vec![Node::Text("v".into())],
+                },
+            ],
+        };
+        assert_eq!(layout(&node, 5, 1).unwrap().into_frame().lines[0], "tabs");
+    }
+
+    #[test]
+    fn on_overflow_is_fixed_and_clickable_when_content_overflows() {
+        let node = Node::Flex {
+            spec: FlexSpec {
+                overflow: Overflow::Scroll,
+                ..FlexSpec::default()
+            },
+            children: vec![
+                Node::Text("abcdef".into()),
+                Node::OnOverflow {
+                    children: vec![plain_button("v", TestAction::New, false)],
+                },
+            ],
+        };
+        let frame = layout(&node, 5, 1).unwrap().into_frame();
+        assert_eq!(frame.lines[0], "abcdv");
+        assert_eq!(frame.hitboxes[0][4], Some(TestAction::New));
     }
 
     #[test]

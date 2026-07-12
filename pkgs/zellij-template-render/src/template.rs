@@ -88,6 +88,9 @@ pub(super) enum Node<A> {
         spec: FlexSpec,
         children: Vec<Node<A>>,
     },
+    OnOverflow {
+        children: Vec<Node<A>>,
+    },
 }
 
 pub(super) fn render_tree<A, F>(
@@ -154,6 +157,7 @@ where
     env.add_filter("fg", foreground);
     env.add_filter("bg", background);
     env.add_function("Flex", flex_marker);
+    env.add_function("OnOverflow", on_overflow_marker);
     let clock_refresh = Arc::clone(&refresh_after);
     env.add_function("Clock", move |kwargs: Kwargs| {
         clock_marker(kwargs, &clock_refresh)
@@ -322,6 +326,13 @@ fn flex_marker(state: &TemplateState<'_, '_>, kwargs: Kwargs) -> Result<String, 
     Ok(format!("{MARKER}F|{direction}|{grow}|{shrink}|{basis}|{gap}|{justify}|{align}|{overflow}{MARKER_END}{body}{MARKER}/F{MARKER_END}"))
 }
 
+fn on_overflow_marker(state: &TemplateState<'_, '_>, kwargs: Kwargs) -> Result<String, Error> {
+    let caller: Value = kwargs.get("caller")?;
+    kwargs.assert_all_used()?;
+    let body = state.format(caller.call(state, &[])?)?;
+    Ok(format!("{MARKER}O{MARKER_END}{body}{MARKER}/O{MARKER_END}"))
+}
+
 fn parse_choice(value: &str, valid: &[&str], name: &str) -> Result<String, Error> {
     if valid.contains(&value) {
         Ok(value.to_string())
@@ -422,6 +433,7 @@ enum ParseOpen<A> {
     Root(Vec<Node<A>>),
     Flex(FlexSpec, Vec<Node<A>>),
     Button(A, bool, String),
+    OnOverflow(Vec<Node<A>>),
 }
 
 fn parse_nodes<A: Clone>(input: &str, arena: &Mutex<Vec<A>>) -> Result<Vec<Node<A>>, Error> {
@@ -435,7 +447,7 @@ fn parse_nodes<A: Clone>(input: &str, arena: &Mutex<Vec<A>>) -> Result<Vec<Node<
             .ok_or_else(|| layout_error("unterminated internal marker"))?;
         let marker = &rest[..end];
         rest = &rest[end + MARKER_END.len_utf8()..];
-        if marker == "/F" || marker == "/B" {
+        if marker == "/F" || marker == "/B" || marker == "/O" {
             let open = stack
                 .pop()
                 .ok_or_else(|| layout_error("unexpected closing marker"))?;
@@ -446,6 +458,7 @@ fn parse_nodes<A: Clone>(input: &str, arena: &Mutex<Vec<A>>) -> Result<Vec<Node<
                     focused,
                     label,
                 },
+                ("/O", ParseOpen::OnOverflow(children)) => Node::OnOverflow { children },
                 _ => return Err(layout_error("mismatched closing marker")),
             };
             push_node(&mut stack, node)?;
@@ -472,6 +485,8 @@ fn parse_nodes<A: Clone>(input: &str, arena: &Mutex<Vec<A>>) -> Result<Vec<Node<
                 .cloned()
                 .ok_or_else(|| layout_error("invalid Button action marker"))?;
             stack.push(ParseOpen::Button(action, focused, String::new()));
+        } else if marker == "O" {
+            stack.push(ParseOpen::OnOverflow(Vec::new()));
         } else {
             return Err(layout_error("unknown internal marker"));
         }
@@ -494,7 +509,7 @@ fn push_text<A>(stack: &mut [ParseOpen<A>], text: &str) -> Result<(), Error> {
         .last_mut()
         .ok_or_else(|| layout_error("text outside layout root"))?
     {
-        ParseOpen::Root(nodes) | ParseOpen::Flex(_, nodes) => {
+        ParseOpen::Root(nodes) | ParseOpen::Flex(_, nodes) | ParseOpen::OnOverflow(nodes) => {
             nodes.push(Node::Text(text.to_string()))
         },
         ParseOpen::Button(_, _, label) => label.push_str(text),
@@ -507,7 +522,12 @@ fn push_node<A>(stack: &mut [ParseOpen<A>], node: Node<A>) -> Result<(), Error> 
         .last_mut()
         .ok_or_else(|| layout_error("node outside layout root"))?
     {
-        ParseOpen::Root(nodes) | ParseOpen::Flex(_, nodes) => nodes.push(node),
+        ParseOpen::Root(_) if matches!(node, Node::OnOverflow { .. }) => {
+            return Err(layout_error("OnOverflow must be a direct child of Flex"))
+        },
+        ParseOpen::Root(nodes) | ParseOpen::Flex(_, nodes) | ParseOpen::OnOverflow(nodes) => {
+            nodes.push(node)
+        },
         ParseOpen::Button(_, _, _) => {
             return Err(layout_error("Button cannot contain layout helpers"))
         },
@@ -603,5 +623,18 @@ mod tests {
             .unwrap()
             .contains("\u{1b}[38;2;1;2;3m"));
         assert!(background("x".into(), "red".into()).is_err());
+    }
+
+    #[test]
+    fn parses_on_overflow_inside_flex() {
+        let arena = Mutex::<Vec<TestAction>>::new(Vec::new());
+        let rendered = format!(
+            "{MARKER}F|row|0|1|auto|0|start|start|scroll{MARKER_END}tabs{MARKER}O{MARKER_END}v{MARKER}/O{MARKER_END}{MARKER}/F{MARKER_END}"
+        );
+        let nodes = parse_nodes(&rendered, &arena).unwrap();
+        assert!(matches!(
+            &nodes[0],
+            Node::Flex { children, .. } if matches!(&children[1], Node::OnOverflow { .. })
+        ));
     }
 }

@@ -262,6 +262,35 @@ Available actions:
 
 Button labels may contain styled text, but cannot contain `Flex`, `Button`, or other layout helpers. Only left click is mapped; right and middle click have no button action.
 
+### OnOverflow
+
+`OnOverflow` renders its body only when the content of its direct parent `Flex` exceeds the available width or height. The parent must use `overflow="scroll"`. The indicator stays fixed while the other children scroll.
+
+`OnOverflow` has no props and each `Flex` accepts at most one.
+
+```jinja
+{% call Flex(grow=1, overflow="scroll") %}
+  {% for tab in session.tabs %}
+    {% call Button(
+      on_click=actions.switch_tab(tab.index),
+      focused=tab.active
+    ) %}
+      {{ tab.name }}
+    {% endcall %}
+  {% endfor %}
+
+  {% call OnOverflow() %}
+    {% call Button(on_click=actions.show_tab_list_modal()) %}
+      ▼
+    {% endcall %}
+  {% endcall %}
+{% endcall %}
+```
+
+The indicator is excluded from the initial overflow measurement. When overflow occurs, its natural size and one parent gap are reserved before the remaining children are laid out again.
+
+`actions.show_tab_list_modal()` is illustrative. A host must register that action before the template can use it; this plugin currently exposes only the actions listed above.
+
 ### Clock
 
 `Clock` renders local time and asks the host to repaint at the next relevant boundary.
