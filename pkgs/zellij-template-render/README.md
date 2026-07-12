@@ -41,6 +41,37 @@ let frame = Renderer::new(actions).render(
 
 `Button` only accepts values returned by registered functions under `actions`. Action decoder results become typed values in `Frame::hitboxes`.
 
+## Components
+
+### Flex
+
+`Flex` arranges its body in a row or column. Nest calls to build complete terminal layouts.
+
+| Prop | Type / values | Default | Guide |
+|---|---|---|---|
+| `direction` | `row`, `column` | `row` | Select main layout axis. |
+| `grow` | Non-negative integer | `0` | Share unused cells with growing siblings. |
+| `shrink` | Non-negative integer | `1` | Share overflow reduction with shrinking siblings. Use `0` for fixed controls. |
+| `basis` | `auto` or non-negative cell count | `auto` | Set initial main-axis size before grow or shrink. |
+| `gap` | Non-negative cell count | `0` | Insert cells between direct children. |
+| `justify` | `start`, `center`, `end`, `space-between`, `space-around` | `start` | Position children on main axis when free cells remain. |
+| `align` | `start`, `center`, `end`, `stretch` | `start` | Position children on cross axis. |
+| `overflow` | `normal`, `scroll` | `normal` | Clip overflow, or follow focused descendant inside a scrolling viewport. |
+
+Basic row with fixed edges and a flexible centre:
+
+```jinja
+{% call Flex(direction="row", gap=1) %}
+  {% call Flex(shrink=0) %}left edge{% endcall %}
+  {% call Flex(grow=1, overflow="scroll") %}
+    ...focused buttons...
+  {% endcall %}
+  {% call Flex(shrink=0) %}right edge{% endcall %}
+{% endcall %}
+```
+
+Use `grow=1` on the region that should consume remaining width. Use `shrink=0` on controls that must remain visible. With `overflow="scroll"`, the viewport follows the descendant `Button` whose resolved focus state is true. There is no separate mouse-controlled scroll position.
+
 ## Theme data
 
 `zellij-template-render` does not create theme data. The host plugin supplies it as template data. `zellij-tabbar` exposes the active Zellij theme through the top-level `theme` variable:

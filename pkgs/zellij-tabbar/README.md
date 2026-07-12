@@ -195,36 +195,7 @@ Choose colours by meaning rather than by expected RGB value. Zellij users can ch
 
 ## Components
 
-Templates can emit plain text and use the following renderer primitives. `Flex` and `Button` are MiniJinja call blocks. `Clock` is a function. Text styling uses filters.
-
-### Flex
-
-`Flex` arranges its body in a row or column. Nest calls to build the complete tab bar.
-
-| Prop | Type / values | Default | Guide |
-|---|---|---|---|
-| `direction` | `row`, `column` | `row` | Select main layout axis. |
-| `grow` | Non-negative integer | `0` | Share unused cells with growing siblings. |
-| `shrink` | Non-negative integer | `1` | Share overflow reduction with shrinking siblings. Use `0` for fixed controls. |
-| `basis` | `auto` or non-negative cell count | `auto` | Set initial main-axis size before grow or shrink. |
-| `gap` | Non-negative cell count | `0` | Insert cells between direct children. |
-| `justify` | `start`, `center`, `end`, `space-between`, `space-around` | `start` | Position children on main axis when free cells remain. |
-| `align` | `start`, `center`, `end`, `stretch` | `start` | Position children on cross axis. |
-| `overflow` | `normal`, `scroll` | `normal` | Clip overflow, or follow focused descendant inside a scrolling viewport. |
-
-Basic row with fixed edges and a flexible centre:
-
-```jinja
-{% call Flex(direction="row", gap=1) %}
-  {% call Flex(shrink=0) %}{{ session.name }}{% endcall %}
-  {% call Flex(grow=1, overflow="scroll") %}
-    ...tab buttons...
-  {% endcall %}
-  {% call Flex(shrink=0) %}right edge{% endcall %}
-{% endcall %}
-```
-
-Use `grow=1` on the region that should consume remaining width. Use `shrink=0` on controls that must remain visible. For tabs, set `overflow="scroll"`; the viewport follows the descendant `Button` whose resolved focus state is true. There is no separate mouse-controlled scroll position.
+Templates can emit plain text and use renderer primitives. See the renderer's [`Flex` documentation](../zellij-template-render/README.md#flex) for layout behavior. `Button` and `OnOverflow` are MiniJinja call blocks. `Clock` is a function. Text styling uses filters.
 
 ### Button
 
