@@ -2,8 +2,9 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use chrono::{Local, TimeZone};
+use chrono::{Local, TimeZone, Timelike};
 use minijinja::value::{Kwargs, Rest};
 use minijinja::{Environment, Error, ErrorKind, State as TemplateState, Value};
 
@@ -94,7 +95,7 @@ pub(super) fn render_tree<A, F>(
     data: Value,
     actions: &ActionRegistry<A>,
     present_button: F,
-) -> Result<Node<A>, Error>
+) -> Result<(Node<A>, Option<Duration>), Error>
 where
     A: Clone + Send + 'static,
     F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
@@ -114,7 +115,7 @@ pub(super) fn render_named_tree<'source, A, F>(
     data: Value,
     actions: &ActionRegistry<A>,
     present_button: F,
-) -> Result<Node<A>, Error>
+) -> Result<(Node<A>, Option<Duration>), Error>
 where
     A: Clone + Send + 'static,
     F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
@@ -139,18 +140,23 @@ fn render_tree_in<'source, A, F>(
     data: Value,
     actions: &ActionRegistry<A>,
     present_button: F,
-) -> Result<Node<A>, Error>
+) -> Result<(Node<A>, Option<Duration>), Error>
 where
     A: Clone + Send + 'static,
     F: Fn(ButtonView<'_, A>) -> Result<ButtonPresentation, Error> + Send + Sync + 'static,
 {
     let arena = Arc::new(Mutex::new(Vec::<A>::new()));
+    let refresh_after = Arc::new(Mutex::new(None));
     env.add_filter("format", format_time);
     env.add_filter("bold", bold);
     env.add_filter("dim", dim);
     env.add_filter("fg", foreground);
     env.add_filter("bg", background);
     env.add_function("Flex", flex_marker);
+    let clock_refresh = Arc::clone(&refresh_after);
+    env.add_function("Clock", move |kwargs: Kwargs| {
+        clock_marker(kwargs, &clock_refresh)
+    });
 
     let action_values = actions
         .decoders
@@ -184,10 +190,14 @@ where
         TemplateTarget::Source(template) => env.render_str(template, data)?,
         TemplateTarget::Name(name) => env.get_template(name)?.render(data)?,
     };
-    Ok(Node::Flex {
+    let root = Node::Flex {
         spec: FlexSpec::default(),
         children: parse_nodes(&rendered, &arena)?,
-    })
+    };
+    let refresh_after = *refresh_after
+        .lock()
+        .map_err(|_| layout_error("clock refresh lock poisoned"))?;
+    Ok((root, refresh_after))
 }
 
 fn decode_action<A: Clone>(value: &Value, arena: &Mutex<Vec<A>>) -> Result<(usize, A), Error> {
@@ -320,6 +330,33 @@ fn parse_choice(value: &str, valid: &[&str], name: &str) -> Result<String, Error
             format!("Flex {name} has invalid value {value:?}"),
         ))
     }
+}
+
+fn clock_marker(
+    kwargs: Kwargs,
+    requested_refresh: &Mutex<Option<Duration>>,
+) -> Result<String, Error> {
+    let pattern = kwargs.get::<String>("format")?;
+    kwargs.assert_all_used()?;
+
+    let now = Local::now();
+    let period_ns = if pattern.contains("SS") || pattern.contains("%S") {
+        1_000_000_000
+    } else {
+        60_000_000_000
+    };
+    let elapsed_ns = if period_ns == 1_000_000_000 {
+        u64::from(now.nanosecond())
+    } else {
+        u64::from(now.second()) * 1_000_000_000 + u64::from(now.nanosecond())
+    };
+    let refresh_after = Duration::from_nanos(period_ns - elapsed_ns);
+    let mut requested = requested_refresh
+        .lock()
+        .map_err(|_| layout_error("clock refresh lock poisoned"))?;
+    *requested = Some(requested.map_or(refresh_after, |current| current.min(refresh_after)));
+
+    format_time(now.timestamp(), pattern)
 }
 
 fn format_time(timestamp: i64, pattern: String) -> Result<String, Error> {

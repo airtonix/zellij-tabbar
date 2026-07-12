@@ -6,7 +6,7 @@ Template-visible snapshot used to produce a frame. `session`, `system`, `theme`,
 
 ## Rendered Frame
 
-Complete render result for one viewport. It contains terminal lines and a same-coordinate two-dimensional hitbox grid.
+Complete render result for one viewport. It contains terminal lines, a same-coordinate two-dimensional hitbox grid, and an optional refresh request describing when dynamic content should render again.
 
 ## Click Action
 

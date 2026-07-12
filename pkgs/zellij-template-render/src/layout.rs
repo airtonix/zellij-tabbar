@@ -77,7 +77,11 @@ impl<A: Clone> Canvas<A> {
             lines.push(line.trim_end_matches(' ').to_string());
             hitboxes.push(actions);
         }
-        Frame { lines, hitboxes }
+        Frame {
+            lines,
+            hitboxes,
+            refresh_after: None,
+        }
     }
 }
 pub(super) fn layout<A: Clone>(

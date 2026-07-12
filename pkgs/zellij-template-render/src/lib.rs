@@ -8,6 +8,7 @@ mod template;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 pub use minijinja::{context, Environment, Error, ErrorKind, Value};
 use unicode_width::UnicodeWidthChar;
@@ -63,6 +64,8 @@ pub struct Viewport {
 pub struct Frame<A> {
     pub lines: Vec<String>,
     pub hitboxes: Vec<Vec<Option<A>>>,
+    /// Earliest delay requested by template helpers before rendering again.
+    pub refresh_after: Option<Duration>,
 }
 
 impl<A> Default for Frame<A> {
@@ -70,6 +73,7 @@ impl<A> Default for Frame<A> {
         Self {
             lines: Vec::new(),
             hitboxes: Vec::new(),
+            refresh_after: None,
         }
     }
 }
@@ -114,8 +118,11 @@ where
         if viewport.rows == 0 || viewport.cols == 0 {
             return Ok(Frame::default());
         }
-        let root = template::render_tree(template, data, &self.actions, present_button)?;
-        Ok(layout::layout(&root, viewport.cols, viewport.rows)?.into_frame())
+        let (root, refresh_after) =
+            template::render_tree(template, data, &self.actions, present_button)?;
+        let mut frame = layout::layout(&root, viewport.cols, viewport.rows)?.into_frame();
+        frame.refresh_after = refresh_after;
+        Ok(frame)
     }
 
     /// Renders a named template from a preconfigured MiniJinja environment.
@@ -133,14 +140,16 @@ where
         if viewport.rows == 0 || viewport.cols == 0 {
             return Ok(Frame::default());
         }
-        let root = template::render_named_tree(
+        let (root, refresh_after) = template::render_named_tree(
             environment,
             template_name,
             data,
             &self.actions,
             present_button,
         )?;
-        Ok(layout::layout(&root, viewport.cols, viewport.rows)?.into_frame())
+        let mut frame = layout::layout(&root, viewport.cols, viewport.rows)?.into_frame();
+        frame.refresh_after = refresh_after;
+        Ok(frame)
     }
 }
 
@@ -176,6 +185,7 @@ pub fn error_frame<A>(error: &Error, viewport: Viewport) -> Frame<A> {
             vec![clipped]
         },
         hitboxes,
+        refresh_after: None,
     }
 }
 
@@ -235,6 +245,28 @@ mod tests {
             )
             .unwrap();
         assert_eq!(frame.lines, ["a  b"]);
+    }
+
+    #[test]
+    fn clock_renders_and_requests_refresh() {
+        let renderer = Renderer::new(ActionRegistry::<TestAction>::new());
+        let frame = renderer
+            .render(
+                r#"{{ Clock(format="HH:MM") }} {{ Clock(format="HH:MM:SS") }}"#,
+                context! {},
+                Viewport { rows: 1, cols: 18 },
+                |button| {
+                    Ok(ButtonPresentation {
+                        label: button.label.to_string(),
+                        focused: button.focused.unwrap_or(false),
+                    })
+                },
+            )
+            .unwrap();
+        assert_eq!(frame.lines[0].chars().filter(|ch| *ch == ':').count(), 3);
+        assert!(frame
+            .refresh_after
+            .is_some_and(|delay| { !delay.is_zero() && delay <= Duration::from_secs(1) }));
     }
 
     #[test]

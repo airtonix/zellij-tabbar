@@ -8,6 +8,7 @@ The crate provides:
 - typed `Button` actions and two-dimensional click hitboxes
 - focus-following overflow
 - ANSI-aware measurement and clipping
+- `Clock(format=...)` with host-scheduled refresh metadata
 - `bold`, `dim`, `fg`, `bg`, and time-format filters
 
 Plugins own template data, action semantics, and button presentation. The renderer does not depend on `zellij-tile`.
@@ -39,6 +40,30 @@ let frame = Renderer::new(actions).render(
 ```
 
 `Button` only accepts values returned by registered functions under `actions`. Action decoder results become typed values in `Frame::hitboxes`.
+
+## Theme data
+
+`zellij-template-render` does not create theme data. The host plugin supplies it as template data. `zellij-tabbar` exposes the active Zellij theme through the top-level `theme` variable:
+
+| Variable | Meaning |
+|---|---|
+| `theme.text` | Default foreground colour |
+| `theme.background` | Default background colour |
+| `theme.active_text` | Foreground colour for active items |
+| `theme.active_background` | Background colour for active items |
+| `theme.muted_text` | Foreground colour for inactive or secondary items |
+| `theme.muted_background` | Background colour for inactive or secondary items |
+| `theme.alert` | Emphasis colour for alerts |
+
+Values are renderer colour tokens shaped as `rgb:R,G,B` or `index:N` and can be passed to `fg` and `bg`:
+
+```jinja
+{{ "normal" | fg(theme.text) | bg(theme.background) }}
+{{ "active" | fg(theme.active_text) | bg(theme.active_background) }}
+{{ "warning" | fg(theme.alert) }}
+```
+
+`theme` is top-level. The removed `context.theme.*` path is unsupported and produces a template error.
 
 ## Template sources
 
