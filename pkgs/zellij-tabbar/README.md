@@ -253,6 +253,21 @@ Button using the `label` prop:
 {{ Button(on_click=actions.new_tab(), label="+") }}
 ```
 
+Style a button label with theme colours:
+
+```jinja
+{% call Button(
+  on_click=actions.switch_tab(tab.index),
+  focused=tab.active
+) %}
+  {% if tab.active %}
+    {{ tab.name | fg(theme.active_text) | bg(theme.active_background) }}
+  {% else %}
+    {{ tab.name | fg(theme.muted_text) | bg(theme.muted_background) }}
+  {% endif %}
+{% endcall %}
+```
+
 Available actions:
 
 | Function | Props | Result |
