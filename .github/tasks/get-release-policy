@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+get_commits() {
+  local release_commit="$1"
+  local main_ref="$2"
+  git rev-list --first-parent "${main_ref}..${release_commit}"
+}
+
+is_root_commit() {
+  local commit="$1"
+  local main_ref="$2"
+  [[ -z "$(get_commits "${commit}" "${main_ref}")" ]]
+}
+
+is_hotfix_commit() {
+  local commit="$1"
+  local main_ref="$2"
+  ! is_root_commit "${commit}" "${main_ref}"
+}
+
+is_hotfix_merge() {
+  local commit="$1"
+  local associated_heads_file="${2:-}"
+
+  if [[ -n "${associated_heads_file}" && -f "${associated_heads_file}" ]] \
+    && grep -qE '^release/' "${associated_heads_file}"; then
+    return 0
+  fi
+
+  mapfile -t commit_line < <(git rev-list --parents -n 1 "${commit}")
+  read -r -a commit_parts <<<"${commit_line[0]}"
+  [[ "${#commit_parts[@]}" -gt 2 ]] || return 1
+
+  mapfile -t release_refs < <(
+    git for-each-ref --format='%(refname)' refs/remotes/origin/release refs/heads/release
+  )
+  [[ "${#release_refs[@]}" -gt 0 ]] || return 1
+
+  local parent release_ref
+  for parent in "${commit_parts[@]:2}"; do
+    for release_ref in "${release_refs[@]}"; do
+      if git merge-base --is-ancestor "${parent}" "${release_ref}"; then
+        return 0
+      fi
+    done
+  done
+  return 1
+}
+
+emit_policy() {
+  jq -n --arg mode "$1" --arg reason "$2" '{mode: $mode, reason: $reason}'
+}
+
+main() {
+  local commit="${1:-}"
+  local source_branch="${2:-}"
+  local main_ref="${3:-refs/remotes/origin/main}"
+  local associated_heads_file="${4:-}"
+
+  [[ -n "${commit}" && -n "${source_branch}" ]] || {
+    echo "usage: get-release-policy <commit> <source-branch> [main-ref] [associated-pr-heads-file]" >&2
+    exit 1
+  }
+  git cat-file -e "${commit}^{commit}" 2>/dev/null || { echo "Unknown commit '${commit}'" >&2; exit 1; }
+  git cat-file -e "${main_ref}^{commit}" 2>/dev/null || { echo "Unknown main ref '${main_ref}'" >&2; exit 1; }
+
+  case "${source_branch}" in
+    main)
+      if [[ -n "${associated_heads_file}" && -f "${associated_heads_file}" ]] \
+        && grep -qE '^release/' "${associated_heads_file}"; then
+        emit_policy skip hotfix-merge-back-pr
+      elif is_hotfix_merge "${commit}"; then
+        emit_policy skip hotfix-merge-back
+      else
+        emit_policy normal main-owned
+      fi
+      ;;
+    release/*)
+      if is_root_commit "${commit}" "${main_ref}"; then
+        emit_policy skip release-root
+      elif is_hotfix_commit "${commit}" "${main_ref}"; then
+        emit_policy hotfix release-owned
+      else
+        echo "Unable to classify release commit '${commit}'" >&2
+        exit 1
+      fi
+      ;;
+    *)
+      echo "Unsupported release branch '${source_branch}'" >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"

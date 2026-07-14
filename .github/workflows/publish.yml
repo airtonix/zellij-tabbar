@@ -1,54 +1,122 @@
 name: Publish
-run-name: Publish ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag || inputs.ref || 'main' }}
+run-name: Publish ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.channel || inputs.channel }}
 
 on:
   workflow_dispatch:
     inputs:
       target:
-        description: "moon project id to publish"
+        description: Moon project ID to publish
         required: true
         type: string
-      ref:
-        description: "Git ref to publish"
-        required: false
-        default: main
-        type: string
-      tag:
-        description: "GitHub release tag; inferred from the ref manifest when omitted"
-        required: false
-        type: string
+      channel:
+        description: Distribution channel
+        required: true
+        default: next
+        type: choice
+        options:
+          - next
+          - latest
   repository_dispatch:
     types: [publish-package]
 
 permissions:
-  id-token: write
   contents: write
-  pages: write
-  packages: write
 
 concurrency:
-  group: publish-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
+  group: publish-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.channel || inputs.channel }}
   cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     environment:
       name: publish-${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}
     env:
-      PUBLISH_TARGET: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.target || inputs.target }}
-      PUBLISH_TAG: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.tag || inputs.tag }}
-      PUBLISH_REF: ${{ github.event_name == 'repository_dispatch' && github.event.client_payload.source_sha || inputs.ref || 'main' }}
+      DISPATCH_TARGET: ${{ github.event.client_payload.target }}
+      DISPATCH_CHANNEL: ${{ github.event.client_payload.channel }}
+      DISPATCH_SOURCE_SHA: ${{ github.event.client_payload.source_sha }}
+      DISPATCH_SOURCE_BRANCH: ${{ github.event.client_payload.source_branch }}
+      MANUAL_TARGET: ${{ inputs.target }}
+      MANUAL_CHANNEL: ${{ inputs.channel }}
+      MANUAL_SOURCE_SHA: ${{ github.sha }}
+      MANUAL_SOURCE_BRANCH: ${{ github.ref_name }}
+      REQUEST_TARGET: ''
+      REQUEST_CHANNEL: ''
+      SOURCE_SHA: ''
+      SOURCE_BRANCH: ''
     steps:
+      - name: Validate publish request
+        env:
+          DISPATCH_SENDER: ${{ github.event.sender.login }}
+        run: |
+          set -euo pipefail
 
-      - name: Checkout
+          if [[ "${GITHUB_EVENT_NAME}" == repository_dispatch ]]; then
+            REQUEST_TARGET="${DISPATCH_TARGET}"
+            REQUEST_CHANNEL="${DISPATCH_CHANNEL}"
+            SOURCE_SHA="${DISPATCH_SOURCE_SHA}"
+            SOURCE_BRANCH="${DISPATCH_SOURCE_BRANCH}"
+          else
+            REQUEST_TARGET="${MANUAL_TARGET}"
+            REQUEST_CHANNEL="${MANUAL_CHANNEL}"
+            SOURCE_SHA="${MANUAL_SOURCE_SHA}"
+            SOURCE_BRANCH="${MANUAL_SOURCE_BRANCH}"
+          fi
+
+          [[ -n "${REQUEST_TARGET}" ]] || { echo 'Publish target is empty' >&2; exit 1; }
+          [[ "${REQUEST_TARGET}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] || {
+            echo "Invalid publish target '${REQUEST_TARGET}'" >&2
+            exit 1
+          }
+          [[ -n "${SOURCE_SHA}" ]] || { echo 'Source SHA is empty' >&2; exit 1; }
+          [[ -n "${SOURCE_BRANCH}" ]] || { echo 'Source branch is empty' >&2; exit 1; }
+          [[ "${SOURCE_SHA}" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid source SHA '${SOURCE_SHA}'" >&2; exit 1; }
+
+          case "${REQUEST_CHANNEL}" in
+            next|latest) ;;
+            *) echo "Unsupported publish channel '${REQUEST_CHANNEL}'" >&2; exit 1 ;;
+          esac
+          case "${SOURCE_BRANCH}" in
+            main|release/*) ;;
+            *) echo "Unsupported source branch '${SOURCE_BRANCH}'" >&2; exit 1 ;;
+          esac
+
+          if [[ "${GITHUB_EVENT_NAME}" == repository_dispatch ]]; then
+            [[ "${GITHUB_ACTOR}" == 'github-actions[bot]' ]] || {
+              echo "Untrusted repository dispatch actor '${GITHUB_ACTOR}'" >&2
+              exit 1
+            }
+            [[ "${DISPATCH_SENDER}" == 'github-actions[bot]' ]] || {
+              echo "Untrusted repository dispatch sender '${DISPATCH_SENDER}'" >&2
+              exit 1
+            }
+            if jq -e '.client_payload | has("tag") or has("mode") or has("version") or has("release_tag")' \
+              "${GITHUB_EVENT_PATH}" >/dev/null; then
+              echo 'Legacy publish metadata fields are forbidden' >&2
+              exit 1
+            fi
+          fi
+
+          {
+            echo "REQUEST_TARGET=${REQUEST_TARGET}"
+            echo "REQUEST_CHANNEL=${REQUEST_CHANNEL}"
+            echo "SOURCE_SHA=${SOURCE_SHA}"
+            echo "SOURCE_BRANCH=${SOURCE_BRANCH}"
+          } >>"${GITHUB_ENV}"
+      - name: Bootstrap trusted workflow checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
-          ref: ${{ env.PUBLISH_REF }}
+          persist-credentials: false
+          ref: ${{ github.workflow_sha }}
 
-      - name: Setup Toolchain
+      - name: Validate and check out immutable source
+        run: |
+          set -euo pipefail
+          .github/tasks/checkout-publish-source "${SOURCE_SHA}" "${SOURCE_BRANCH}"
+
+      - name: Setup toolchain
         uses: moonrepo/setup-toolchain@8794f0318b9df4a43a5ddc23cefd16f595b423dd # v0
         with:
           auto-install: true
@@ -60,118 +128,70 @@ jobs:
           key-prefix: moon-publish
           cache-version: v1
 
-      - name: Validate publish target
+      - id: metadata
+        name: Resolve publish metadata
+        env:
+          RUN_ATTEMPT: ${{ github.run_attempt }}
         run: |
           set -euo pipefail
 
-          if [ -z "${PUBLISH_TARGET}" ]; then
-            echo "ERROR: PUBLISH_TARGET is empty. Provide a moon project id." >&2
-            {
-              echo "## Publish Validation Failed"
-              echo
-              echo "- reason: empty target"
-              echo "- tag: \`${PUBLISH_TAG}\`"
-              echo "- trigger: \`${{ github.event_name }}\`"
-            } >> "${GITHUB_STEP_SUMMARY}"
-            exit 1
-          fi
+          metadata="$(pkgs/tools/deployment/resolve-publish-metadata \
+            "${REQUEST_TARGET}" "${REQUEST_CHANNEL}" "${SOURCE_BRANCH}" "${RUN_ATTEMPT}")"
+          jq -e \
+            --arg target "${REQUEST_TARGET}" \
+            '.target == $target
+              and (.source | length > 0)
+              and (.version | length > 0)
+              and (.release_tag | length > 0)' \
+            >/dev/null <<<"${metadata}"
 
-          projects_json="$(moon query projects)"
-          if ! jq -e --arg target "${PUBLISH_TARGET}" '.projects[] | select(.id == $target)' >/dev/null <<<"${projects_json}"; then
-            valid_targets="$(jq -r '.projects[].id' <<<"${projects_json}" | sort | paste -sd ', ' -)"
+          publish_target="$(jq -r .target <<<"${metadata}")"
+          publish_version="$(jq -r .version <<<"${metadata}")"
+          publish_release_tag="$(jq -r .release_tag <<<"${metadata}")"
+          publish_project_source="$(jq -r .source <<<"${metadata}")"
+          metadata_compact="$(jq -c . <<<"${metadata}")"
+          {
+            echo "PUBLISH_TARGET=${publish_target}"
+            echo "PUBLISH_CHANNEL=${REQUEST_CHANNEL}"
+            echo "PUBLISH_VERSION=${publish_version}"
+            echo "PUBLISH_RELEASE_TAG=${publish_release_tag}"
+            echo "PUBLISH_PROJECT_SOURCE=${publish_project_source}"
+            echo "PUBLISH_REF=${SOURCE_SHA}"
+          } >>"${GITHUB_ENV}"
+          echo "metadata=${metadata_compact}" >>"${GITHUB_OUTPUT}"
 
-            echo "ERROR: Unknown PUBLISH_TARGET '${PUBLISH_TARGET}'." >&2
-            echo "Valid targets: ${valid_targets}" >&2
-
-            {
-              echo "## Publish Validation Failed"
-              echo
-              echo "- reason: unknown target"
-              echo "- target: \`${PUBLISH_TARGET}\`"
-              echo "- tag: \`${PUBLISH_TAG}\`"
-              echo "- trigger: \`${{ github.event_name }}\`"
-              echo
-              echo "### Valid moon project ids"
-              echo
-              echo "\`${valid_targets}\`"
-            } >> "${GITHUB_STEP_SUMMARY}"
-
-            exit 1
-          fi
-
-          project_source="$(jq -r --arg target "${PUBLISH_TARGET}" '.projects[] | select(.id == $target) | .source' <<<"${projects_json}")"
-          echo "PUBLISH_PROJECT_SOURCE=${project_source}" >> "${GITHUB_ENV}"
-
-      - name: Resolve publish tag
-        if: env.PUBLISH_TAG == ''
+      - name: Resolve GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
+          .github/tasks/ensure-publish-release \
+            "${PUBLISH_CHANNEL}" "${PUBLISH_RELEASE_TAG}" "${PUBLISH_REF}"
 
-          version="$(jq -r --arg source "${PUBLISH_PROJECT_SOURCE}" '.[$source] // empty' .release-please-manifest.json)"
-          if [[ ! "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "ERROR: No stable version found for '${PUBLISH_PROJECT_SOURCE}' in .release-please-manifest.json." >&2
-            exit 1
-          fi
-
-          prefix="v${version}-alpha."
-          alpha="$(
-            gh api --paginate "repos/${GITHUB_REPOSITORY}/releases" --jq '.[].tag_name' |
-              awk -v prefix="${prefix}" '
-                index($0, prefix) == 1 {
-                  n = substr($0, length(prefix) + 1)
-                  if (n ~ /^[0-9]+$/ && n > max) max = n
-                }
-                END { print max + 1 }
-              '
-          )"
-          tag="${prefix}${alpha}"
-
-          echo "PUBLISH_TAG=${tag}" >> "${GITHUB_ENV}"
-          echo "Inferred publish tag '${tag}' from ${PUBLISH_PROJECT_SOURCE} version ${version}."
-
-      - name: Ensure release exists
+      - name: Publish target
         env:
           GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          if ! gh release view "${PUBLISH_TAG}" >/dev/null 2>&1; then
-            gh release create "${PUBLISH_TAG}" \
-              --target "${PUBLISH_REF}" \
-              --title "${PUBLISH_TAG}" \
-              --prerelease \
-              --generate-notes
-          fi
-
-      - name: Publish target(s)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_TOKEN: ${{ github.token }}
-          DOCS_PUBLISH_SSH_KEY: ${{ secrets.DOCS_PUBLISH_SSH_KEY }}
-          DOCS_PUBLISH_TOKEN: ${{ secrets.DOCS_PUBLISH_TOKEN }}
-          NPM_CONFIG_PROVENANCE: true
-          PUBLISH_TARGET: ${{ env.PUBLISH_TARGET }}
-          PUBLISH_TAG: ${{ env.PUBLISH_TAG }}
         run: |
           set -euo pipefail
           moon run "${PUBLISH_TARGET}:publish" --force
+
       - name: Publish summary
         if: always()
         run: |
-          set -euo pipefail
           {
-            echo "## Publish Summary"
+            echo '## Publish summary'
             echo
-            echo "| Field | Value |"
-            echo "|---|---|"
-            echo "| target | \`${PUBLISH_TARGET}\` |"
-            echo "| ref | \`${PUBLISH_REF}\` |"
-            echo "| tag | \`${PUBLISH_TAG}\` |"
-            echo "| trigger | \`${{ github.event_name }}\` |"
+            echo '| Field | Value |'
+            echo '|---|---|'
+            echo "| target | \`${PUBLISH_TARGET:-${REQUEST_TARGET}}\` |"
+            echo "| channel | \`${PUBLISH_CHANNEL:-${REQUEST_CHANNEL}}\` |"
+            echo "| version | \`${PUBLISH_VERSION:-unresolved}\` |"
+            echo "| release tag | \`${PUBLISH_RELEASE_TAG:-unresolved}\` |"
+            echo "| branch | \`${SOURCE_BRANCH}\` |"
+            echo "| SHA | \`${SOURCE_SHA}\` |"
+            echo "| trigger | \`${GITHUB_EVENT_NAME}\` |"
             echo "| result | \`${{ job.status }}\` |"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } >>"${GITHUB_STEP_SUMMARY}"
 
       - name: Moon run report summary
         if: always()
@@ -179,4 +199,4 @@ jobs:
         uses: moonrepo/run-report-action@bbe7e99bf2aca819ec660ec01fc59d84bdd492d6 # v1.10.0
         with:
           access-token: ${{ github.token }}
-          skip-comment: "true"
+          skip-comment: 'true'

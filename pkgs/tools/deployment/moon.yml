@@ -1,0 +1,11 @@
+---
+id: deployment
+language: bash
+layer: tool
+
+tasks:
+  test:
+    command: "npx --yes bats@1.13.0 tests/*.bats"
+    inputs:
+      - "resolve-publish-metadata"
+      - "tests/**/*"

@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+channel="${1:-}"
+release_tag="${2:-}"
+source_ref="${3:-}"
+
+case "${channel}" in
+  next|latest) ;;
+  *) echo "Unsupported publish channel '${channel}'" >&2; exit 1 ;;
+esac
+[[ -n "${release_tag}" && -n "${source_ref}" ]] || {
+  echo "usage: ensure-publish-release <channel> <release-tag> <source-ref>" >&2
+  exit 1
+}
+git check-ref-format "refs/tags/${release_tag}" >/dev/null || {
+  echo "Invalid release tag '${release_tag}'" >&2
+  exit 1
+}
+
+view_release() {
+  gh release view "${release_tag}" --json isDraft,isPrerelease
+}
+
+verify_release() {
+  local release_json="$1"
+  local expected_prerelease="$2"
+  local is_draft is_prerelease actual_ref
+
+  is_draft="$(jq -r .isDraft <<<"${release_json}")"
+  is_prerelease="$(jq -r .isPrerelease <<<"${release_json}")"
+  [[ "${is_draft}" == false ]] || { echo "Release '${release_tag}' is a draft" >&2; exit 1; }
+  [[ "${is_prerelease}" == "${expected_prerelease}" ]] || {
+    echo "Release '${release_tag}' has wrong prerelease state '${is_prerelease}'" >&2
+    exit 1
+  }
+
+  git fetch --force origin "refs/tags/${release_tag}:refs/tags/${release_tag}"
+  actual_ref="$(git rev-list -n 1 "refs/tags/${release_tag}")"
+  [[ "${actual_ref}" == "${source_ref}" ]] || {
+    echo "Release '${release_tag}' targets '${actual_ref}', expected '${source_ref}'" >&2
+    exit 1
+  }
+}
+
+if [[ "${channel}" == latest ]]; then
+  release_json="$(view_release)" || {
+    echo "Stable Release Please release '${release_tag}' does not exist" >&2
+    exit 1
+  }
+  verify_release "${release_json}" false
+  exit 0
+fi
+
+if ! release_json="$(view_release 2>/dev/null)"; then
+  if ! gh release create "${release_tag}" \
+    --target "${source_ref}" \
+    --title "${release_tag}" \
+    --prerelease \
+    --generate-notes; then
+    release_json="$(view_release)" || {
+      echo "Failed to create or find prerelease '${release_tag}'" >&2
+      exit 1
+    }
+  else
+    release_json="$(view_release)"
+  fi
+fi
+verify_release "${release_json}" true

@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+source_sha="${1:-}"
+source_branch="${2:-}"
+
+[[ "${source_sha}" =~ ^[0-9a-f]{40}$ ]] || { echo "Invalid source SHA '${source_sha}'" >&2; exit 1; }
+case "${source_branch}" in
+  main|release/*) ;;
+  *) echo "Unsupported source branch '${source_branch}'" >&2; exit 1 ;;
+esac
+
+git fetch --force --tags origin \
+  '+refs/heads/main:refs/remotes/origin/main' \
+  '+refs/heads/release/*:refs/remotes/origin/release/*'
+branch_ref="refs/remotes/origin/${source_branch}"
+git show-ref --verify --quiet "${branch_ref}" || {
+  echo "Trusted source branch '${source_branch}' does not exist" >&2
+  exit 1
+}
+git cat-file -e "${source_sha}^{commit}" 2>/dev/null || {
+  echo "Unknown source SHA '${source_sha}'" >&2
+  exit 1
+}
+git merge-base --is-ancestor "${source_sha}" "${branch_ref}" || {
+  echo "Source SHA '${source_sha}' is not reachable from '${source_branch}'" >&2
+  exit 1
+}
+git checkout --detach "${source_sha}"
+[[ "$(git rev-parse HEAD)" == "${source_sha}" ]] || {
+  echo 'Exact source checkout failed' >&2
+  exit 1
+}

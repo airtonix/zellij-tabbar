@@ -397,7 +397,12 @@ moon run repo:e2e # requires bats, python3, and zellij
 Publish the built WASM to an existing GitHub release:
 
 ```bash
-PUBLISH_TAG=v0.1.0 moon run zellij-tabbar:publish
+PUBLISH_TARGET=zellij-tabbar \
+PUBLISH_CHANNEL=latest \
+PUBLISH_VERSION=0.1.0 \
+PUBLISH_RELEASE_TAG=zellij-tabbar-v0.1.0 \
+PUBLISH_REF="$(git rev-parse HEAD)" \
+moon run zellij-tabbar:publish
 ```
 
-Set `GITHUB_REPOSITORY=owner/repo` when the current checkout has no GitHub remote.
+Set `GITHUB_REPOSITORY=owner/repo` when the current checkout has no GitHub remote. Normal publication runs through `.github/workflows/publish.yml`.

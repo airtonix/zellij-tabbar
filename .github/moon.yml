@@ -1,0 +1,20 @@
+---
+id: github
+language: bash
+layer: tool
+
+tasks:
+  test:
+    script: |
+      set -euo pipefail
+      npx --yes bats@1.13.0 tasks/*.bats actions/sync-moon-to-release-please/*.bats
+      actionlint workflows/release.yml workflows/publish.yml
+    inputs:
+      - "actions/**/*"
+      - "tasks/**/*"
+      - "workflows/**/*"
+
+  lint:
+    command: "actionlint workflows/release.yml workflows/publish.yml"
+    inputs:
+      - "workflows/**/*"

@@ -1,0 +1,8 @@
+name: Sync Moon projects to Release Please
+description: Generate Release Please package entries from publishable Moon projects
+
+runs:
+  using: composite
+  steps:
+    - shell: bash
+      run: "${{ github.action_path }}/action.sh"

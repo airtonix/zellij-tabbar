@@ -1,6 +1,8 @@
 ---
 projects:
   sources:
+    deployment: "pkgs/tools/deployment"
+    github: ".github"
     repo: "."
     zellij-tabbar: "pkgs/zellij-tabbar"
     zellij-template-render: "pkgs/zellij-template-render"

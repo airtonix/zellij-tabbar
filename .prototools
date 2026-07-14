@@ -1,6 +1,11 @@
+actionlint = "1.7.12"
+node = "22.17.0"
 rust = "stable"
+
+[plugins.tools]
+actionlint = "https://raw.githubusercontent.com/Phault/proto-toml-plugins/9808cc412785ac59ec1b0d61bd1bee152f6f6b56/actionlint/plugin.toml"
 
 [settings]
 detect-strategy = "only-prototools"
 auto-install = true
-builtin-plugins = ["rust"]
+builtin-plugins = ["node", "rust"]

@@ -34,7 +34,7 @@ prs="$(jq -r '.prs // "[]"' <<<"${release_payload}")"
   echo "| releases_created | \`${releases_created}\` |"
   echo "| prs_created | \`${prs_created}\` |"
   echo "| publish_units_source | \`moon query projects --affected\` |"
-  echo "| publish_signal | \`releases_created=true => dispatch actual release tag\` |"
+  echo "| publish_channel | \`releases_created=true => latest; otherwise next\` |"
 
   if [ "${releases_created}" = "true" ]; then
     echo
@@ -43,7 +43,7 @@ prs="$(jq -r '.prs // "[]"' <<<"${release_payload}")"
   fi
 
   echo
-  echo "_Publish units come from moon affected query. release-please supplies the GitHub release tag._"
+  echo "_Publish units come from Moon affected query. Publish metadata resolves after immutable source checkout._"
 
   if [ "${prs_created}" = "true" ]; then
     echo

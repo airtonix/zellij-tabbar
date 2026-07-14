@@ -18,84 +18,151 @@ permissions:
 jobs:
   process:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     outputs:
+      channel: ${{ steps.channel.outputs.channel }}
       publish_matrix: ${{ steps.publish-matrix.outputs.publish_matrix }}
     steps:
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
 
-      - name: SetupToolchain
+      - name: Fetch release ownership refs
+        run: |
+          set -euo pipefail
+          git fetch --force origin \
+            '+refs/heads/main:refs/remotes/origin/main' \
+            '+refs/heads/release/*:refs/remotes/origin/release/*'
+
+      - id: policy
+        name: Resolve release ownership
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          associated_heads="$(mktemp)"
+          trap 'rm -f "${associated_heads}"' EXIT
+          gh api --paginate \
+            -H 'Accept: application/vnd.github+json' \
+            "repos/${GITHUB_REPOSITORY}/commits/${GITHUB_SHA}/pulls" \
+            --jq '.[].head.ref' >"${associated_heads}"
+
+          policy="$(.github/tasks/get-release-policy \
+            "${GITHUB_SHA}" \
+            "${GITHUB_REF_NAME}" \
+            refs/remotes/origin/main \
+            "${associated_heads}")"
+          mode="$(jq -r .mode <<<"${policy}")"
+          reason="$(jq -r .reason <<<"${policy}")"
+
+          case "${mode}" in
+            normal) config_file=release-please-config--release.json ;;
+            hotfix) config_file=release-please-config--hotfix.json ;;
+            skip) config_file= ;;
+            *) echo "Unsupported release policy mode '${mode}'" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "mode=${mode}"
+            echo "reason=${reason}"
+            echo "config_file=${config_file}"
+          } >>"${GITHUB_OUTPUT}"
+
+      - name: Summarize release ownership
+        run: |
+          {
+            echo '## Release ownership'
+            echo
+            echo "- branch: \`${GITHUB_REF_NAME}\`"
+            echo "- commit: \`${GITHUB_SHA}\`"
+            echo "- mode: \`${{ steps.policy.outputs.mode }}\`"
+            echo "- reason: \`${{ steps.policy.outputs.reason }}\`"
+          } >>"${GITHUB_STEP_SUMMARY}"
+
+      - name: Setup toolchain
+        if: steps.policy.outputs.mode != 'skip'
         uses: moonrepo/setup-toolchain@8794f0318b9df4a43a5ddc23cefd16f595b423dd # v0
         with:
           auto-install: true
           auto-setup: true
 
-      - name: RestoreMoonCache
+      - name: Restore Moon cache
+        if: steps.policy.outputs.mode != 'skip'
         uses: ./.github/actions/moon-cache
         with:
           key-prefix: moon-release
           cache-version: v1
 
-      - name: PrepareReleasePleaseMode
-        id: mode
+      - name: Generate Release Please synchronization state
+        if: steps.policy.outputs.mode != 'skip'
+        uses: ./.github/actions/sync-moon-to-release-please
+
+      - name: Verify Release Please synchronization state is committed
+        if: steps.policy.outputs.mode != 'skip'
         run: |
-          set -euo pipefail
+          git diff --exit-code -- \
+            .release-please-manifest.json \
+            release-please-config--release.json \
+            release-please-config--hotfix.json
 
-          mode="$(.github/tasks/get-release-mode "${GITHUB_REF_NAME}")"
-
-          case "${mode}" in
-            hotfix)
-              config_file="release-please-config--hotfix.json"
-              ;;
-            normal)
-              config_file="release-please-config--release.json"
-              ;;
-            *)
-              echo "Unsupported release mode: ${mode}" >&2
-              exit 1
-              ;;
-          esac
-
-          echo "mode=${mode}" >> "${GITHUB_OUTPUT}"
-          echo "config_file=${config_file}" >> "${GITHUB_OUTPUT}"
-
-      - uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4
-        id: release-please
-        name: RunReleasePlease
+      - id: release-please
+        name: Run Release Please
+        if: steps.policy.outputs.mode != 'skip'
+        uses: googleapis/release-please-action@16a9c90856f42705d54a6fda1823352bdc62cf38 # v4
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          config-file: ${{ steps.mode.outputs.config_file }}
+          config-file: ${{ steps.policy.outputs.config_file }}
           manifest-file: .release-please-manifest.json
+          target-branch: ${{ github.ref_name }}
           skip-github-pull-request: false
 
-      - name: SummaryReleasePleaseOutputs
+      - name: Summarize Release Please outputs
+        if: steps.policy.outputs.mode != 'skip'
         run: |
           cat <<'EOF' | ./.github/tasks/summarise-release-please.sh
           ${{ toJson(steps.release-please.outputs) }}
           EOF
         env:
-          RP_MODE: ${{ steps.mode.outputs.mode }}
-          RP_CONFIG_FILE: ${{ steps.mode.outputs.config_file }}
+          RP_MODE: ${{ steps.policy.outputs.mode }}
+          RP_CONFIG_FILE: ${{ steps.policy.outputs.config_file }}
+
+      - id: channel
+        name: Select publish channel
+        if: steps.policy.outputs.mode != 'skip'
+        env:
+          RELEASES_CREATED: ${{ steps.release-please.outputs.releases_created }}
+        run: |
+          set -euo pipefail
+          if [[ "${RELEASES_CREATED}" == true ]]; then
+            channel=latest
+          else
+            channel=next
+          fi
+          echo "channel=${channel}" >>"${GITHUB_OUTPUT}"
 
       - id: publish-matrix
-        name: GeneratePublishMatrix
+        name: Generate publish matrix
+        env:
+          POLICY_MODE: ${{ steps.policy.outputs.mode }}
+          RP_OUTPUTS: ${{ toJson(steps.release-please.outputs) }}
         run: |
           set -euo pipefail
 
+          if [[ "${POLICY_MODE}" == skip ]]; then
+            echo 'publish_matrix=[]' >>"${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
           payload_file="$(mktemp)"
           trap 'rm -f "${payload_file}"' EXIT
+          printf '%s\n' "${RP_OUTPUTS}" >"${payload_file}"
 
-          cat >"${payload_file}" <<'EOF'
-          ${{ toJson(steps.release-please.outputs) }}
-          EOF
-          # release-please supplies the release-created signal and GitHub release tag.
-          # Publish units are resolved from Moon's affected project query.
           base_ref='${{ github.event.before }}'
           head_ref='${{ github.sha }}'
-          if [ -z "${base_ref}" ] || [ "${base_ref}" = "0000000000000000000000000000000000000000" ]; then
+          if [[ -z "${base_ref}" || "${base_ref}" == 0000000000000000000000000000000000000000 ]]; then
             if git rev-parse --verify HEAD^ >/dev/null 2>&1; then
               base_ref="$(git rev-parse HEAD^)"
             else
@@ -103,50 +170,39 @@ jobs:
             fi
           fi
 
-          publish_matrix="$(.github/tasks/get-publish-matrix "@${payload_file}" "${base_ref}" "${head_ref}" | jq -rc '.')"
-          echo "publish_matrix=${publish_matrix}" >> "${GITHUB_OUTPUT}"
+          publish_matrix="$(.github/tasks/get-publish-matrix \
+            "@${payload_file}" "${base_ref}" "${head_ref}" | jq -rc '.')"
+          echo "publish_matrix=${publish_matrix}" >>"${GITHUB_OUTPUT}"
 
-      - name: SummaryPublishMatrixOutputs
+      - name: Summarize publish matrix
+        env:
+          CHANNEL: ${{ steps.channel.outputs.channel }}
+          PUBLISH_MATRIX: ${{ steps.publish-matrix.outputs.publish_matrix }}
         run: |
-          set -euo pipefail
-
-          publish_matrix=$(cat <<'EOF'
-          ${{ steps.publish-matrix.outputs.publish_matrix }}
-          EOF
-          )
-
           {
-            echo "## Publish Matrix Outputs"
-            echo "- source of publish units: \`moon query projects --affected\`"
-            echo "- publish signal: \`release-please outputs.releases_created\`"
-            echo "- publish tag: release-please \`--tag_name\` output"
+            echo '## Publish matrix'
             echo
-            echo "${publish_matrix}" | jq -r '
-              .[] |
-              "- target: \(.target // ""), version: \(.version // ""), mode: \(.mode // "")"
-            '
-            echo "<details><summary>publish matrix json</summary>"
+            echo "- channel: \`${CHANNEL:-none}\`"
+            echo "- source: \`moon query projects --affected\`"
             echo
             echo '```json'
-            echo "${publish_matrix}" | jq .
+            jq . <<<"${PUBLISH_MATRIX}"
             echo '```'
-            echo
-            echo "</details>"
-          } >> "${GITHUB_STEP_SUMMARY}"
+          } >>"${GITHUB_STEP_SUMMARY}"
 
   publish:
     needs: process
+    if: needs.process.outputs.publish_matrix != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    if: needs.process.outputs.publish_matrix != '[]'
     strategy:
       fail-fast: false
       matrix:
         include: ${{ fromJson(needs.process.outputs.publish_matrix) }}
     steps:
-      - name: DispatchPublish-${{ matrix.target }}-${{ matrix.tag }}
+      - name: Dispatch ${{ matrix.target }} on ${{ needs.process.outputs.channel }}
         uses: peter-evans/repository-dispatch@bf47d102fdb849e755b0b0023ea3e81a44b6f570 # v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
           event-type: publish-package
-          client-payload: '{"target":"${{ matrix.target }}","tag":"${{ matrix.tag }}","mode":"${{ matrix.mode }}","version":"${{ matrix.version }}","source_sha":"${{ github.sha }}"}'
+          client-payload: '{"target":"${{ matrix.target }}","channel":"${{ needs.process.outputs.channel }}","source_sha":"${{ github.sha }}","source_branch":"${{ github.ref_name }}"}'

@@ -5,7 +5,8 @@
   "bump-patch-for-minor-pre-major": true,
   "packages": {
     "pkgs/zellij-tabbar": {
-      "release-type": "rust"
+      "release-type": "rust",
+      "component": "zellij-tabbar"
     }
   }
 }
