@@ -347,7 +347,7 @@ The indicator is excluded from the initial overflow measurement. When overflow o
 {{ Clock(format="%Y-%m-%d %H:%M") }}
 ```
 
-Formats containing `SS` or `%S` repaint at the next second boundary. Other formats repaint at the next minute boundary. `system.time | format("HH:MM")` formats the current frame timestamp without scheduling another repaint.
+Formats containing `SS` or `%S` repaint at the next second boundary. Other formats repaint at the next minute boundary. `system.time | format_time("HH:MM")` formats the current frame timestamp without scheduling another repaint.
 
 Friendly format tokens:
 
@@ -369,12 +369,12 @@ Filters transform text before layout. They can be chained.
 | `dim` | None | Dim text, reset after value. |
 | `fg(color)` | `color`: `rgb:R,G,B` or `index:N` | Set foreground, then reset it. |
 | `bg(color)` | `color`: `rgb:R,G,B` or `index:N` | Set background, then reset it. |
-| `format(pattern)` | `pattern`: time format string | Format a Unix timestamp in local time. |
+| `format_time(pattern)` | `pattern`: time format string | Format a Unix timestamp in local time. |
 
 ```jinja
 {{ "active" | bold | fg(theme.active_text) | bg(theme.active_background) }}
 {{ "inactive" | dim | fg(theme.muted_text) }}
-{{ system.time | format("HH:MM") }}
+{{ system.time | format_time("HH:MM") }}
 ```
 
 ANSI styling is measured and clipped by visible terminal cells, so escape sequences do not consume layout width.

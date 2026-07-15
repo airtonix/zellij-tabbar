@@ -22,6 +22,10 @@ layout {
   {%- call Button(on_click=actions.new_tab()) -%}
     +
   {%- endcall -%}
+
+  {%- call Flex(shrink=0) -%}
+    {{- system.time | format_time(" HH:MM ") -}}
+  {%- endcall -%}
 {%- endcall -%}
 "#
             }

@@ -44,6 +44,15 @@ let frame = Renderer::new(actions).render(
 
 `Button` only accepts values returned by registered functions under `actions`. Action decoder results become typed values in `Frame::hitboxes`.
 
+## Filters
+
+`format_time(pattern)` accepts a Unix timestamp in whole seconds and formats it in the renderer's local timezone. Patterns support Chrono `strftime` directives such as `%Y`, `%m`, `%d`, `%H`, `%M`, and `%S`, plus the friendly aliases `YYYY`, `YY`, `HH`, `MM`, and `SS`.
+
+```jinja
+{{ system.time | format_time("%Y-%m-%d %H:%M") }}
+{{ system.time | format_time("HH:MM:SS") }}
+```
+
 ## Components
 
 ### Flex

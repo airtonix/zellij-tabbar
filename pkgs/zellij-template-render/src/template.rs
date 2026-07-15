@@ -152,7 +152,7 @@ where
 {
     let arena = Arc::new(Mutex::new(Vec::<A>::new()));
     let refresh_after = Arc::new(Mutex::new(None));
-    env.add_filter("format", format_time);
+    env.add_filter("format_time", format_time);
     env.add_filter("bold", bold);
     env.add_filter("dim", dim);
     env.add_filter("fg", foreground);

@@ -278,6 +278,26 @@ mod tests {
     }
 
     #[test]
+    fn format_time_formats_unix_timestamps() {
+        let renderer = Renderer::new(ActionRegistry::<TestAction>::new());
+        let frame = renderer
+            .render(
+                r#"{{ 1700000000 | format_time("%s") }}"#,
+                context! {},
+                Viewport { rows: 1, cols: 10 },
+                |button| {
+                    Ok(ButtonPresentation {
+                        label: button.label.to_string(),
+                        focused: button.focused.unwrap_or(false),
+                    })
+                },
+            )
+            .unwrap();
+
+        assert_eq!(frame.lines, ["1700000000"]);
+    }
+
+    #[test]
     fn clock_renders_and_requests_refresh() {
         let renderer = Renderer::new(ActionRegistry::<TestAction>::new());
         let frame = renderer
