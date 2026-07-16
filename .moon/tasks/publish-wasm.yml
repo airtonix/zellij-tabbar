@@ -1,0 +1,31 @@
+inheritedBy:
+  tags:
+    - publishes-wasm
+
+tasks:
+  publish-wasm:
+    deps:
+      - "~:build"
+    inputs:
+      - "target/wasm32-wasip1/release/*.wasm"
+    options:
+      cache: false
+    script: |
+      set -euo pipefail
+      target="${PUBLISH_TARGET:?PUBLISH_TARGET is required}"
+      channel="${PUBLISH_CHANNEL:?PUBLISH_CHANNEL is required}"
+      version="${PUBLISH_VERSION:?PUBLISH_VERSION is required}"
+      tag="${PUBLISH_RELEASE_TAG:?PUBLISH_RELEASE_TAG is required}"
+      ref="${PUBLISH_REF:?PUBLISH_REF is required}"
+      [[ "${target}" == "${MOON_PROJECT_ID}" ]] || { echo "Unexpected publish target '${target}' for '${MOON_PROJECT_ID}'" >&2; exit 1; }
+      [[ "$channel" == next || "$channel" == latest ]] || { echo "Invalid publish channel '$channel'" >&2; exit 1; }
+      [[ -n "$version" && -n "$ref" ]]
+      wasm_path="$PWD/target/wasm32-wasip1/release/${target}.wasm"
+      repo_args=()
+      if [ -n "${GITHUB_REPOSITORY:-}" ]; then
+        repo_args=(--repo "$GITHUB_REPOSITORY")
+      fi
+
+      test -f "$wasm_path"
+      gh release view "$tag" "${repo_args[@]}" >/dev/null
+      gh release upload "$tag" "$wasm_path#${target}.wasm" "${repo_args[@]}" --clobber
