@@ -1,3 +1,4 @@
 {
-  "pkgs/zellij-tabbar": "0.1.0"
+  "pkgs/zellij-tabbar": "0.1.0",
+  "pkgs/zellij-template-render": "0.1.0"
 }

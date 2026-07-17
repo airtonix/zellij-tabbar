@@ -7,6 +7,10 @@
     "pkgs/zellij-tabbar": {
       "release-type": "rust",
       "component": "zellij-tabbar"
+    },
+    "pkgs/zellij-template-render": {
+      "component": "zellij-template-render",
+      "release-type": "rust"
     }
   }
 }
